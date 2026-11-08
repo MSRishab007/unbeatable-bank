@@ -1,0 +1,28 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+*.secret.tfvars
+.terraform.lock.hcl.bak
+
+# Credentials / secrets
+*.json.key
+*-sa-key.json
+.env
+.env.*
+
+# Build / deps
+node_modules/
+dist/
+build/
+__pycache__/
+*.pyc
+bin/
+vendor/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

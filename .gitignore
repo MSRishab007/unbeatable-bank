@@ -4,6 +4,7 @@
 *.tfstate.*
 *.tfplan
 crash.log
+terraform.tfvars
 *.secret.tfvars
 .terraform.lock.hcl.bak
 

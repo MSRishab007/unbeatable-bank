@@ -1,0 +1,11 @@
+Unbeatable Bank - CS/SS G527 Cloud Computing - Task Division
+
+ID No.          Name            Tasks (a-h)                     Services
+-------------   -------------   -----------------------------   ------------------------------------------------
+                (M1)            (a) IaC, (d) GitOps             Identity & Auth, Account, Ledger, Deposits
+                (M2)            (b) Serverless + comms,         Transaction Intake, Notification,
+                                (c) GKE HPA + load test         Rules & Policy, Interest & EOD Engine
+                (M3)            (f) Leaderless/Dynamo concept,  DynaStore, Rate Limit Coordinator,
+                                (g) Storage                     Risk Detection
+                (M4)            (e) Flink stream processing,    Audit Analytics (Flink), Fraud Alert,
+                                (h) Observability               Case Management

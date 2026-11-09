@@ -1,0 +1,55 @@
+# Local development stack. Start with:  docker compose up --build
+#   Ledger API docs:  http://localhost:8081/docs
+#   Account API docs: http://localhost:8082/docs
+# In GCP these run on GKE and are deployed by ArgoCD; this file is never used there.
+
+x-healthcheck: &http-health
+  test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')"]
+  interval: 5s
+  timeout: 3s
+  retries: 20
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/local/postgres-init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      retries: 20
+
+  ledger:
+    build: ./services/ledger
+    # Locally, migrate on start. On Kubernetes a separate PreSync Job does this.
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8080"
+    environment:
+      DATABASE_URL: postgresql://ledger_svc:ledger_dev@postgres:5432/core_banking
+    ports:
+      - "8081:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck: *http-health
+
+  account:
+    build: ./services/account
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8080"
+    environment:
+      DATABASE_URL: postgresql://account_svc:account_dev@postgres:5432/core_banking
+      LEDGER_URL: http://ledger:8080
+      PAN_HASH_KEY: dev-only-pan-key
+    ports:
+      - "8082:8080"
+    depends_on:
+      ledger:
+        condition: service_healthy
+    healthcheck: *http-health
+
+volumes:
+  pgdata:

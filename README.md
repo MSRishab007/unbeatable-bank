@@ -13,6 +13,12 @@ Cloud-native banking system with real-time fraud detection and a Dynamo-style le
 | `services/` | One folder per microservice |
 | `deploy/` | Kubernetes manifests / Helm charts tracked by ArgoCD |
 | `docs/` | Design document, `BILLING.md`, `task_division.txt` |
+| `infra/local/` | Local-only setup used by `docker-compose.yml` |
+
+## Local development
+
+`docker compose up --build` starts Postgres and the services built so far.
+See [services/README.md](services/README.md).
 
 ## Ground rules
 

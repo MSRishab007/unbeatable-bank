@@ -2,18 +2,30 @@ name: CI
 
 on:
   pull_request:
-    paths: ["services/**", ".github/workflows/ci.yml"]
+    paths: ["services/**", "proto/**", "scripts/**", ".github/workflows/ci.yml"]
   push:
     branches: [main]
-    paths: ["services/**", ".github/workflows/ci.yml"]
+    paths: ["services/**", "proto/**", "scripts/**", ".github/workflows/ci.yml"]
 
 jobs:
+  protos:
+    # Fails if someone edits a .proto without regenerating the committed stubs.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install grpcio-tools==1.68.1
+      - run: python scripts/gen_protos.py
+      - run: git diff --exit-code -- services/*/app/gen
+
   test:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        service: [ledger, account]
+        service: [ledger, account, intake]
 
     services:
       postgres:

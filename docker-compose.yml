@@ -1,6 +1,7 @@
 # Local development stack. Start with:  docker compose up --build
 #   Ledger API docs:  http://localhost:8081/docs
 #   Account API docs: http://localhost:8082/docs
+#   Intake API docs:  http://localhost:8083/docs
 # In GCP these run on GKE and are deployed by ArgoCD; this file is never used there.
 
 x-healthcheck: &http-health
@@ -30,8 +31,10 @@ services:
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8080"
     environment:
       DATABASE_URL: postgresql://ledger_svc:ledger_dev@postgres:5432/core_banking
+      GRPC_PORT: "50051"
     ports:
       - "8081:8080"
+      - "50051:50051"
     depends_on:
       postgres:
         condition: service_healthy
@@ -48,6 +51,20 @@ services:
       - "8082:8080"
     depends_on:
       ledger:
+        condition: service_healthy
+    healthcheck: *http-health
+
+  intake:
+    build: ./services/intake
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8080"
+    environment:
+      DATABASE_URL: postgresql://intake_svc:intake_dev@postgres:5432/core_banking
+      ACCOUNT_URL: http://account:8080
+      LEDGER_GRPC: ledger:50051
+    ports:
+      - "8083:8080"
+    depends_on:
+      account:
         condition: service_healthy
     healthcheck: *http-health
 

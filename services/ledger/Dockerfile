@@ -15,6 +15,6 @@ COPY app ./app
 RUN useradd --system --uid 10001 app
 USER 10001
 
-EXPOSE 8080
+EXPOSE 8080 50051
 # The same image runs migrations: `alembic upgrade head` (Kubernetes Job / ArgoCD PreSync hook)
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]

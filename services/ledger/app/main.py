@@ -1,9 +1,11 @@
 """Ledger service REST API.
 
-Internal-only: called by Account, Transaction Intake, Deposits and the EOD engine.
-A gRPC interface for the Intake hot path will wrap the same posting functions.
+Internal-only: called by Account, Deposits and the EOD engine over REST.
+Transaction Intake uses the gRPC interface (app/grpc_server.py, port 50051),
+which wraps the same posting functions.
 """
 
+import os
 from contextlib import asynccontextmanager
 from datetime import date, datetime
 from typing import Literal
@@ -13,14 +15,18 @@ from fastapi import Depends, FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from . import posting
+from . import grpc_server, posting
 from .db import close_pool, init_pool
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    init_pool()
+    pool = init_pool()
+    grpc_port = int(os.getenv("GRPC_PORT", "50051"))
+    server = grpc_server.start(pool, grpc_port) if grpc_port else None
     yield
+    if server:
+        server.stop(grace=5).wait()
     close_pool()
 
 

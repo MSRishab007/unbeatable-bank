@@ -235,6 +235,14 @@ When DynaStore cannot be reached at all, the system degrades by amount instead o
 failing: small payments are still admitted (fail open), large ones are refused by
 the rate limiter or held by the risk engine (fail closed).
 
+**Clients and failed nodes.** Services reach DynaStore through any node, which
+coordinates the request. A node that refuses or times out is skipped for a few
+seconds, so a hung node (a frozen process, or a stopped container whose name no
+longer resolves) costs one timeout rather than one per request. Counter updates
+are retried on another node after a timeout. That may count one attempt twice,
+which is harmless for rate limits and velocity rules; failing the payment is not.
+`test_a_hung_node_does_not_fail_writes_or_slow_everything_down` covers this.
+
 ## 7. Storage
 
 | Product | What is stored | Why this product |
@@ -296,6 +304,23 @@ The same SQL runs in CI on a local Flink mini-cluster with file-backed tables.
 - Least privilege: one database user per service, Workload Identity only where needed,
   non-root containers, NetworkPolicy around internal services.
 
+- The web app keeps its session in the browser tab only (`sessionStorage`), so closing
+  the tab signs the customer out; it builds every page with DOM text nodes, never by
+  inserting HTML strings, so data from other customers cannot inject script.
+
+### Web application
+
+One static front end (`services/gateway/static`, plain HTML, CSS and JavaScript with no
+build step) served by the API Gateway, so there is no second public endpoint and no
+cross-origin configuration. It has a customer side (accounts, passbook, payments by
+number, pay ID or QR code, deposits, inbox, security) and a staff console (fraud desk,
+approvals, branch desk, system). Each payment is shown as a slip listing the checks it
+passed (duplicate check, rate limits, account and payee, limits, risk engine, ledger)
+and the one that stopped it, which makes the pipeline of section 4 visible to the user.
+A QR code is a link to the pay page with the payee and amount filled in; the payer still
+sees the payee's masked name and confirms. `scripts/ui_test.py` drives the app in
+Chromium against a running stack and is part of CI.
+
 ## 11. Design rationale in brief
 
 | Decision | Alternative | Why |
@@ -318,4 +343,7 @@ The same SQL runs in CI on a local Flink mini-cluster with file-backed tables.
 - DynaStore's membership is static (the peers are listed in configuration). Adding
   nodes means a rolling restart; anti-entropy then moves the data.
 - SMS is simulated (real SMS in India needs DLT registration); email is optional.
+- The public endpoint is plain HTTP on a load balancer IP (no domain, so no certificate).
+  Browsers only allow the camera on https, so on GCP the QR scanner falls back to
+  uploading a picture of the code; it uses the camera in a Codespace or on localhost.
 - The service-to-service trust model relies on network isolation rather than mTLS.

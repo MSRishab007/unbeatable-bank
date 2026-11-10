@@ -25,6 +25,7 @@ Where each task lives in the repository:
   (a) infra/bootstrap, infra/main, infra/platform, Makefile
   (b) functions/notification, proto/, libs/common/ubcommon/outbox.py, kafka.py, pubsub.py
   (c) deploy/bank (HPAs), loadtest/payments.js
+      web app: services/gateway/static, scripts/ui_test.py (owned with the API Gateway)
   (d) deploy/argocd, deploy/bank, .github/workflows/release.yml
   (e) services/audit-analytics, infra/main/dataproc.tf
   (f) services/dynastore, services/ratelimit, docs/design.md section 6

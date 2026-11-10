@@ -155,6 +155,28 @@ def test_impossible_travel_with_new_device_is_held(engine):
     assert result.decision == "HOLD" and {"IMPOSSIBLE_TRAVEL", "NEW_DEVICE"} <= set(result.reasons)
 
 
+@pytest.mark.parametrize("hour", range(24))
+def test_stolen_login_pattern_is_held_at_any_hour(engine, hour):
+    """New-device login, new device, new payee, large amount: HELD for review whatever the
+    time of day. ODD_HOURS adds weight but must not turn a review into an outright block."""
+    c = Customer(engine)
+    engine.raise_signal(f"sig:cust:{c.id}:new_device_login")
+    at = datetime(2026, 11, 11, hour, 15, tzinfo=IST).timestamp()
+    result = c.pay(10_000, device=uuid.uuid4().hex, payee=uuid.uuid4().hex, at=at)
+    assert result.decision == "HOLD", (hour, result.score, result.reasons)
+    assert ("ODD_HOURS" in result.reasons) == (1 <= hour < 5)
+
+
+@pytest.mark.parametrize("hour", [3, 12])
+def test_stolen_login_from_abroad_is_blocked(engine, hour):
+    c = Customer(engine)
+    engine.raise_signal(f"sig:cust:{c.id}:new_device_login")
+    engine.raise_signal(f"sig:cust:{c.id}:impossible_travel")
+    at = datetime(2026, 11, 11, hour, 15, tzinfo=IST).timestamp()
+    result = c.pay(10_000, device=uuid.uuid4().hex, payee=uuid.uuid4().hex, at=at)
+    assert (result.decision, result.score) == ("BLOCK", 100)
+
+
 def test_deny_list_blocks(engine):
     c = Customer(engine)
     engine.store.put(f"deny:acct:{c.payee}", "confirmed fraud")
@@ -187,7 +209,7 @@ def test_rules_reload_without_restart(store, tmp_path):
     rules = Rules(path)
     engine = Engine(store.client(), rules)
     assert Customer(engine).pay(20_000, idle_days=200).decision == "CHALLENGE"   # 55
-    rules_copy(tmp_path, lambda c: c["rules"]["DORMANT_ACCOUNT"].update(weight=90))
+    rules_copy(tmp_path, lambda c: c["rules"]["DORMANT_ACCOUNT"].update(weight=100))
     import os
     os.utime(path, (1, 1))
     rules._checked = 0                                   # skip the 10-second poll interval
@@ -197,7 +219,7 @@ def test_rules_reload_without_restart(store, tmp_path):
 def test_invalid_rules_file_keeps_previous_rules(store, tmp_path):
     path = rules_copy(tmp_path, lambda c: None)
     rules = Rules(path)
-    open(path, "w").write("rules: {BROKEN: {weight: lots}}\nbands: {challenge: 30, hold: 60, block: 85}\n")
+    open(path, "w").write("rules: {BROKEN: {weight: lots}}\nbands: {challenge: 30, hold: 60, block: 95}\n")
     rules._checked = 0
     assert "VELOCITY_1M" in rules.current()["rules"]
 

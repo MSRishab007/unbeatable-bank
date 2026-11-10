@@ -109,6 +109,7 @@ ROUTES: list[Route] = [
     Route("POST", "/api/staff/kyc/{customer_id}/verify", "account",
           "/internal/v1/customers/{customer_id}/kyc/verify", S, ("KYC",)),
     Route("POST", "/api/staff/cash-deposits", "intake", "/internal/v1/cash-deposits", S, ("TELLER",)),
+    Route("GET", "/api/staff/customers", "account", "/internal/v1/customers", S),
     Route("GET", "/api/staff/customers/{customer_id}", "account", "/v1/customers/{customer_id}", S),
     Route("GET", "/api/staff/customers/{customer_id}/accounts", "account", "/v1/customers/{customer_id}/accounts", S),
     Route("GET", "/api/staff/accounts/{account_id}", "account", "/v1/accounts/{account_id}", S),

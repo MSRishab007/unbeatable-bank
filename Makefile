@@ -15,7 +15,7 @@ TF_MAIN      = terraform -chdir=infra/main
 TF_PLATFORM  = terraform -chdir=infra/platform
 GATEWAY_IP   = $(shell kubectl -n bank get service gateway-public -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
 
-.PHONY: help init up down flink-up flink-down kubeconfig url status argocd grafana smoke loadtest simulate logs destroy check-project
+.PHONY: help init up down flink-up flink-down kubeconfig url status argocd grafana smoke ui-test loadtest simulate logs destroy check-project
 
 help:
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-12s %s\n", $$1, $$2}'
@@ -63,6 +63,9 @@ grafana: ## open Grafana on http://localhost:3000 (admin / unbeatable)
 
 smoke: ## end-to-end check against the deployed system (set ADMIN_PASSWORD / ANALYST_PASSWORD)
 	python scripts/smoke_test.py http://$(GATEWAY_IP) --skip-eod
+
+ui-test: ## browser test of the web app against the deployed system (needs playwright)
+	python scripts/ui_test.py --base-url http://$(GATEWAY_IP)
 
 loadtest: ## sustained load to make the autoscalers scale out (needs k6)
 	k6 run -e BASE_URL=http://$(GATEWAY_IP) loadtest/payments.js

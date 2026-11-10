@@ -47,6 +47,30 @@ def test_invalid_phone_rejected(conn):
                                 phone="12345", email="xy@example.com")
 
 
+def test_staff_search_finds_a_customer_by_any_identifier(conn, ledger, make_customer):
+    cid = make_customer()
+    other = make_customer()
+    me = service.get_customer(conn, cid)
+    account = service.open_account(conn, ledger, product_type="SAVINGS", holder_ids=[cid], actor=ACTOR)
+
+    def found(query):
+        return [c["customer_id"] for c in service.search_customers(conn, query)]
+
+    assert found(me["cif_number"].lower()) == [cid]
+    assert found(me["email"].upper()) == [cid]
+    assert found(me["phone"]) == [cid]
+    assert found(account["account_number"]) == [cid]
+    assert found(str(cid)) == [cid]
+    assert cid in found(me["full_name"][:4].lower())
+    assert found("no-such-person") == []
+    assert found("%") == []                       # wildcards are data, not patterns
+    assert "pan_hash" not in service.search_customers(conn, me["email"])[0]
+
+    waiting = make_customer(verified=False)
+    pending = [c["customer_id"] for c in service.search_customers(conn, "", kyc_status="PENDING")]
+    assert pending == [waiting] and other not in pending
+
+
 # ------------------------------------------------------------------ accounts
 
 

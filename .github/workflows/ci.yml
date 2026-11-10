@@ -94,6 +94,61 @@ jobs:
         env:
           TEST_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
 
+  e2e:
+    # Starts every service as a plain process (no Docker, no Kafka) and drives the whole
+    # bank through the gateway: API smoke test, fraud personas, then the web app in Chromium.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            libs/common/pyproject.toml
+            services/*/requirements*.txt
+      - name: Install dependencies
+        run: |
+          pip install -e "libs/common[kafka]"
+          cat services/*/requirements.txt | sort -u > /tmp/requirements.txt
+          pip install -r /tmp/requirements.txt httpx playwright
+          playwright install --with-deps chromium
+      - name: Create the databases
+        run: |
+          docker exec ${{ job.services.postgres.id }} psql -U postgres -c "ALTER SYSTEM SET max_connections = 300"
+          docker restart ${{ job.services.postgres.id }}
+          for i in $(seq 1 30); do pg_isready -h localhost -q && break; sleep 1; done
+          psql -h localhost -U postgres -v ON_ERROR_STOP=1 -f infra/local/postgres-init.sql
+        env:
+          PGPASSWORD: postgres
+      - name: Start the bank
+        run: |
+          nohup python scripts/dev_stack.py > /tmp/stack.log 2>&1 &
+          for i in $(seq 1 90); do curl -sf localhost:8080/healthz > /dev/null && exit 0; sleep 2; done
+          cat /tmp/stack.log; exit 1
+      - run: python scripts/smoke_test.py
+      - run: python loadtest/simulator.py
+      - run: python scripts/ui_test.py --shots /tmp/shots
+      - name: Keep logs and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e
+          path: |
+            /tmp/shots
+            /tmp/stack.log
+            .dev/logs
+          if-no-files-found: ignore
+
   functions:
     runs-on: ubuntu-latest
     steps:

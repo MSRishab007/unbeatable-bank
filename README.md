@@ -20,7 +20,7 @@ leaderless store, built on Google Cloud for CS/SS G527 Cloud Computing (BITS Pil
 | `infra/` | Terraform: `bootstrap` (project, IAM, budgets), `main` (cloud resources), `platform` (ArgoCD, secrets), `local` (dev database) |
 | `deploy/` | What ArgoCD deploys: `bank` (all services), `kafka`, `monitoring`, `argocd/apps` |
 | `loadtest/` | k6 load test and the fraud simulator |
-| `scripts/` | Smoke test, local stack runner, code and manifest generators |
+| `scripts/` | Smoke test, browser test, local stack runner, code and manifest generators |
 | `docs/` | Design document, deployment guide, billing notes, task division |
 
 ## Run it on your machine
@@ -32,11 +32,31 @@ docker compose up --build            # first build takes a few minutes
 pip install httpx
 python scripts/smoke_test.py         # 48 end-to-end checks through the gateway
 python loadtest/simulator.py         # fraud personas
+pip install playwright && playwright install chromium
+python scripts/ui_test.py            # 28 checks of the web app in a real browser
 ```
 
 Open http://localhost:8080 for the web app and http://localhost:8080/api/docs for the API.
 Staff logins for local development: `admin` / `admin-dev-pass`, `analyst1` / `analyst-dev-pass`,
-`teller1` / `teller-dev-pass`.
+`teller1` / `teller-dev-pass`, `kyc1` / `kyc-dev-pass`.
+
+## The web app
+
+`services/gateway/static` is the whole front end: plain HTML, CSS and JavaScript
+with no build step, served by the gateway.
+
+- **Customers:** sign up, open savings and current accounts (single or joint),
+  passbook, pay by account number, pay ID or QR code (camera or a picture of the
+  code), OTP confirmation when a payment looks unusual, fixed and recurring
+  deposits with live quotes and early closure, inbox, devices and sign-in history.
+- **Staff** (the Staff tab on the sign-in page): fraud desk with cases and held
+  payments, two-person approvals, branch desk (customer search, KYC, cash
+  deposits, audit-trail check) and a System page with the live DynaStore ring,
+  fault injection, ledger reconciliation and the bank calendar.
+
+Every payment is shown as a slip with the six checks it went through and which
+one stopped it. In a Codespace, open the forwarded port 8080; it is served over
+https there, so the camera scanner works.
 
 Without Docker, with a local PostgreSQL: see the top of `scripts/dev_stack.py`.
 

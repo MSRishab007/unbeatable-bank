@@ -144,6 +144,11 @@ def create_customer(body: CustomerIn, conn=Depends(get_conn)):
     return service.create_customer(conn, **body.model_dump())
 
 
+@app.get("/internal/v1/customers")
+def search_customers(query: str = "", kyc_status: str | None = None, limit: int = 20, conn=Depends(get_conn)):
+    return service.search_customers(conn, query, kyc_status, limit)
+
+
 @app.get("/v1/customers/{customer_id}")
 def get_customer(customer_id: UUID, conn=Depends(get_conn)):
     return service.get_customer(conn, customer_id)

@@ -1,5 +1,0 @@
-# Copy to terraform.tfvars.
-state_bucket = "unbeatable-bank-XX-tfstate"
-
-# Only if your repository is a fork or has another name:
-# git_repo_url = "https://github.com/<you>/unbeatable-bank.git"

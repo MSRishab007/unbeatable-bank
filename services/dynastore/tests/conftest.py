@@ -28,6 +28,7 @@ class Cluster:
         self.kwargs.update(node_kwargs)
         self.nodes: dict[str, Node] = {}
         self.servers = {}
+        self.black_holes = []
         for node_id in self.ids:
             self.start(node_id)
 
@@ -45,6 +46,16 @@ class Cluster:
         """Crash a node: its server and background work stop; its disk survives."""
         self.servers.pop(node_id).stop(0).wait()
         self.nodes.pop(node_id).stop()
+
+    def hang(self, node_id):
+        """A node that is there but never answers (a frozen process, a pod whose
+        network went away): connections are accepted and then nothing happens."""
+        self.stop(node_id)
+        hole = socket.socket()
+        hole.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        hole.bind(("127.0.0.1", int(self.peers[node_id].split(":")[1])))
+        hole.listen(64)                      # never accept(): the kernel queues, nobody replies
+        self.black_holes.append(hole)
 
     def wipe(self, node_id):
         import shutil
@@ -73,6 +84,8 @@ class Cluster:
     def shutdown(self):
         for node_id in list(self.nodes):
             self.stop(node_id)
+        for hole in self.black_holes:
+            hole.close()
 
 
 def wait_for(condition, timeout=5.0, interval=0.05):

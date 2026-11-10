@@ -105,6 +105,9 @@ load balancer. Data is kept. What remains costs a few cents a day (disks).
 | 9 | Console: Cloud SQL, Firestore, Cloud Storage | Three storage products (g) |
 | 10 | `make down` | Cost control |
 
+To check a deployment from your laptop: `make smoke` (API), `make ui-test` (web app
+in a browser) and `make simulate` (fraud personas).
+
 ## Not yet verified on GCP
 
 The application code is tested locally end to end. The Terraform validates and
@@ -112,4 +115,5 @@ the manifests pass schema checks, but none of it had been applied to a real
 project when this was written. Expect to fix small things on the first
 `make up`; the most likely places are the Dataproc submit script
 (`services/audit-analytics/submit.sh`), chart versions in `deploy/argocd/apps`
-and IAM roles for the Cloud Function build.
+and IAM roles for the Cloud Function build. The `e2e` job in CI has only been run by
+hand on a development machine, not yet on GitHub's runners.

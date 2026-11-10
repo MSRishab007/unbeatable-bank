@@ -157,6 +157,33 @@ def get_customer(conn: psycopg.Connection, customer_id: UUID) -> dict:
     return _public_customer(row)
 
 
+def search_customers(conn: psycopg.Connection, query: str, kyc_status: str | None = None, limit: int = 20) -> list[dict]:
+    """Staff lookup. Exact match on CIF, email, phone or account number; otherwise a name search.
+
+    An empty query lists the newest customers (optionally only one KYC status).
+    """
+    q = query.strip()
+    where, params = [], []
+    if q:
+        where.append(
+            "(c.cif_number = upper(%s) OR c.email = lower(%s) OR c.phone = %s OR c.customer_id::text = lower(%s) "
+            "OR c.full_name ILIKE %s OR EXISTS (SELECT 1 FROM account.account_holders h "
+            "JOIN account.accounts a ON a.account_id = h.account_id "
+            "WHERE h.customer_id = c.customer_id AND a.account_number = %s))")
+        like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        params += [q, q, q, q, like, q]
+    if kyc_status:
+        where.append("c.kyc_status = %s")
+        params.append(kyc_status)
+    sql = "SELECT c.* FROM account.customers c"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY c.created_at DESC LIMIT %s"
+    with _cur(conn) as cur:
+        cur.execute(sql, (*params, max(1, min(limit, 50))))
+        return [_public_customer(r) for r in cur.fetchall()]
+
+
 def verify_kyc(conn: psycopg.Connection, ledger: LedgerClient, customer_id: UUID, actor: str) -> dict:
     """Mark KYC verified and activate accounts where every holder is now verified."""
     with conn.transaction(), _cur(conn) as cur:

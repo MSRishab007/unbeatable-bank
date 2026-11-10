@@ -11,6 +11,9 @@
 #            shadow: true    evaluates and logs it without counting it (try out new rules safely)
 # Amounts are in paise.
 
+# BLOCK is kept for near-certain fraud (a deny-listed payee, a stolen login from the
+# other side of the world). Everything else that looks wrong is HELD for a person to
+# review, so a weak signal such as the time of day can never turn a review into a block.
 bands:
   challenge: 30
   hold: 60

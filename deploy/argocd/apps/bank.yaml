@@ -1,0 +1,35 @@
+# The bank itself: every microservice, DynaStore, autoscalers and migration jobs.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: bank
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/MSRishab007/unbeatable-bank.git
+    targetRevision: main
+    path: deploy/bank
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: bank
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 20
+      backoff:
+        duration: 20s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+  ignoreDifferences:
+    # The Horizontal Pod Autoscaler owns the replica count of scaled services.
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas

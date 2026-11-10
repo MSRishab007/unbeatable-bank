@@ -1,72 +1,291 @@
-# Local development stack. Start with:  docker compose up --build
-#   Ledger API docs:  http://localhost:8081/docs
-#   Account API docs: http://localhost:8082/docs
-#   Intake API docs:  http://localhost:8083/docs
-# In GCP these run on GKE and are deployed by ArgoCD; this file is never used there.
+# The whole bank on one machine. Used for development only: in GCP the same
+# images run on GKE and are deployed by ArgoCD.
+#
+#   docker compose up --build          # first start takes a few minutes
+#   python scripts/smoke_test.py       # end-to-end check (pip install httpx)
+#
+#   Web / API gateway   http://localhost:8080        (API docs: /api/docs)
+#   Staff logins        admin / admin-dev-pass, analyst1 / analyst-dev-pass, teller1 / teller-dev-pass
+#
+# After pulling changes that add a service or a database, reset the local data once:
+#   docker compose down -v
 
-x-healthcheck: &http-health
+x-env: &env
+  JWT_SECRET: dev-only-jwt-secret-change-me-0123456789
+  DOCSTORE: postgres            # Firestore in GCP
+  DOCSTORE_URL: postgresql://docstore_svc:docstore_dev@postgres:5432/docstore
+  PUBSUB: local                 # Pub/Sub + the Notification Cloud Function in GCP
+  OBJSTORE: local               # Cloud Storage in GCP
+  OBJSTORE_DIR: /data/objects
+  KAFKA_BOOTSTRAP: kafka:9092
+  DYNASTORE_NODES: dyna-0:7000,dyna-1:7000,dyna-2:7000
+  DYNASTORE_URL: http://dyna-0:8080
+  LEDGER_URL: http://ledger:8080
+  ACCOUNT_URL: http://account:8080
+  INTAKE_URL: http://intake:8080
+  RATELIMIT_URL: http://ratelimit:8080
+  RISK_URL: http://risk:8080
+  IDENTITY_URL: http://identity:8080
+  FRAUD_URL: http://fraud:8080
+  DEPOSITS_URL: http://deposits:8080
+  LEDGER_GRPC: ledger:50051
+  RATELIMIT_GRPC: ratelimit:50052
+  RISK_GRPC: risk:50053
+
+x-health: &health
   test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')"]
   interval: 5s
   timeout: 3s
-  retries: 20
+  retries: 30
 
 services:
   postgres:
     image: postgres:16
     environment:
       POSTGRES_PASSWORD: postgres
-    ports:
-      - "5432:5432"
+    command: ["postgres", "-c", "max_connections=200"]
+    ports: ["5432:5432"]
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./infra/local/postgres-init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 3s
-      retries: 20
+      retries: 30
+
+  kafka:
+    image: apache/kafka:3.8.1
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  # Creates the topics up front so consumers don't start against missing topics.
+  kafka-init:
+    image: apache/kafka:3.8.1
+    depends_on:
+      kafka: {condition: service_healthy}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        for t in txn-events auth-events risk-signals analytics-results ledger.journal-posted ledger.hold-changed account.events; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic $$t --partitions 3 --replication-factor 1
+        done
+    restart: "no"
+
+  dyna-0:
+    image: unbeatable/dynastore
+    build: {context: ., dockerfile: services/Dockerfile, args: {SERVICE: dynastore}}
+    environment:
+      NODE_ID: dyna-0
+      PEERS: dyna-0=dyna-0:7000,dyna-1=dyna-1:7000,dyna-2=dyna-2:7000
+      GRPC_PORT: "7000"
+      DATA_DIR: /data
+    volumes: ["dyna0:/data"]
+    healthcheck: *health
+
+  dyna-1:
+    image: unbeatable/dynastore
+    build: {context: ., dockerfile: services/Dockerfile, args: {SERVICE: dynastore}}
+    environment:
+      NODE_ID: dyna-1
+      PEERS: dyna-0=dyna-0:7000,dyna-1=dyna-1:7000,dyna-2=dyna-2:7000
+      GRPC_PORT: "7000"
+      DATA_DIR: /data
+    volumes: ["dyna1:/data"]
+    healthcheck: *health
+
+  dyna-2:
+    image: unbeatable/dynastore
+    build: {context: ., dockerfile: services/Dockerfile, args: {SERVICE: dynastore}}
+    environment:
+      NODE_ID: dyna-2
+      PEERS: dyna-0=dyna-0:7000,dyna-1=dyna-1:7000,dyna-2=dyna-2:7000
+      GRPC_PORT: "7000"
+      DATA_DIR: /data
+    volumes: ["dyna2:/data"]
+    healthcheck: *health
 
   ledger:
-    build: ./services/ledger
-    # Locally, migrate on start. On Kubernetes a separate PreSync Job does this.
+    image: unbeatable/ledger
+    build: {context: ., dockerfile: services/Dockerfile, args: {SERVICE: ledger}}
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8080"
     environment:
+      <<: *env
       DATABASE_URL: postgresql://ledger_svc:ledger_dev@postgres:5432/core_banking
       GRPC_PORT: "50051"
-    ports:
-      - "8081:8080"
-      - "50051:50051"
     depends_on:
-      postgres:
-        condition: service_healthy
-    healthcheck: *http-health
+      postgres: {condition: service_healthy}
+    healthcheck: *health
 
   account:
-    build: ./services/account
+    image: unbeatable/account
+    build: {context: ., dockerfile: services/Dockerfile, args: {SERVICE: account}}
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8080"
     environment:
+      <<: *env
       DATABASE_URL: postgresql://account_svc:account_dev@postgres:5432/core_banking
-      LEDGER_URL: http://ledger:8080
-      PAN_HASH_KEY: dev-only-pan-key
-    ports:
-      - "8082:8080"
     depends_on:
-      ledger:
-        condition: service_healthy
-    healthcheck: *http-health
+      ledger: {condition: service_healthy}
+    healthcheck: *health
+
+  ratelimit:
+    image: unbeatable/ratelimit
+    build: {context: ., dockerfile: services/Dockerfile, args: {SERVICE: ratelimit}}
+    environment:
+      <<: *env
+      GRPC_PORT: "50052"
+    depends_on:
+      dyna-0: {condition: service_healthy}
+      dyna-1: {condition: service_healthy}
+      dyna-2: {condition: service_healthy}
+    healthcheck: *health
+
+  risk:
+    image: unbeatable/risk
+    build: {context: ., dockerfile: services/Dockerfile, args: {SERVICE: risk}}
+    environment:
+      <<: *env
+      GRPC_PORT: "50053"
+    depends_on:
+      dyna-0: {condition: service_healthy}
+      dyna-1: {condition: service_healthy}
+      dyna-2: {condition: service_healthy}
+    healthcheck: *health
+
+  identity:
+    image: unbeatable/identity
+    build: {context: ., dockerfile: services/Dockerfile, args: {SERVICE: identity}}
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8080"
+    environment:
+      <<: *env
+      DATABASE_URL: postgresql://identity_svc:identity_dev@postgres:5432/identity
+      STAFF_BOOTSTRAP: "admin:ADMIN:admin-dev-pass,analyst1:ANALYST:analyst-dev-pass,analyst2:ANALYST:analyst-dev-pass,teller1:TELLER:teller-dev-pass,kyc1:KYC:kyc-dev-pass"
+    depends_on:
+      account: {condition: service_healthy}
+      ratelimit: {condition: service_healthy}
+    healthcheck: *health
 
   intake:
-    build: ./services/intake
+    image: unbeatable/intake
+    build: {context: ., dockerfile: services/Dockerfile, args: {SERVICE: intake}}
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8080"
     environment:
+      <<: *env
       DATABASE_URL: postgresql://intake_svc:intake_dev@postgres:5432/core_banking
-      ACCOUNT_URL: http://account:8080
-      LEDGER_GRPC: ledger:50051
-    ports:
-      - "8083:8080"
     depends_on:
-      account:
-        condition: service_healthy
-    healthcheck: *http-health
+      account: {condition: service_healthy}
+      ledger: {condition: service_healthy}
+      ratelimit: {condition: service_healthy}
+      risk: {condition: service_healthy}
+      identity: {condition: service_healthy}
+    healthcheck: *health
+
+  fraud:
+    image: unbeatable/fraud
+    build: {context: ., dockerfile: services/Dockerfile, args: {SERVICE: fraud}}
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8080"
+    environment:
+      <<: *env
+      DATABASE_URL: postgresql://fraud_svc:fraud_dev@postgres:5432/cases
+    depends_on:
+      intake: {condition: service_healthy}
+      kafka-init: {condition: service_completed_successfully}
+    healthcheck: *health
+
+  deposits:
+    image: unbeatable/deposits
+    build: {context: ., dockerfile: services/Dockerfile, args: {SERVICE: deposits}}
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8080"
+    environment:
+      <<: *env
+      DATABASE_URL: postgresql://deposits_svc:deposits_dev@postgres:5432/core_banking
+    volumes: ["objects:/data/objects"]
+    depends_on:
+      account: {condition: service_healthy}
+      ledger: {condition: service_healthy}
+    healthcheck: *health
+
+  gateway:
+    image: unbeatable/gateway
+    build: {context: ., dockerfile: services/Dockerfile, args: {SERVICE: gateway}}
+    environment:
+      <<: *env
+      ALLOW_SIM_HEADERS: "true"
+    ports: ["8080:8080"]
+    depends_on:
+      identity: {condition: service_healthy}
+      intake: {condition: service_healthy}
+      fraud: {condition: service_healthy}
+      deposits: {condition: service_healthy}
+    healthcheck: *health
+
+  # Outbox relays: publish each service's committed events to Kafka (same image as the service).
+  outbox-ledger:
+    image: unbeatable/ledger
+    command: python -m ubcommon.outbox --schema ledger
+    environment:
+      DATABASE_URL: postgresql://ledger_svc:ledger_dev@postgres:5432/core_banking
+      KAFKA_BOOTSTRAP: kafka:9092
+      OUTBOX_METRICS_PORT: "0"
+    depends_on:
+      ledger: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+    restart: unless-stopped
+
+  outbox-account:
+    image: unbeatable/account
+    command: python -m ubcommon.outbox --schema account
+    environment:
+      DATABASE_URL: postgresql://account_svc:account_dev@postgres:5432/core_banking
+      KAFKA_BOOTSTRAP: kafka:9092
+      OUTBOX_METRICS_PORT: "0"
+    depends_on:
+      account: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+    restart: unless-stopped
+
+  outbox-intake:
+    image: unbeatable/intake
+    command: python -m ubcommon.outbox --schema intake
+    environment:
+      DATABASE_URL: postgresql://intake_svc:intake_dev@postgres:5432/core_banking
+      KAFKA_BOOTSTRAP: kafka:9092
+      OUTBOX_METRICS_PORT: "0"
+    depends_on:
+      intake: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+    restart: unless-stopped
+
+  outbox-identity:
+    image: unbeatable/identity
+    command: python -m ubcommon.outbox --schema identity
+    environment:
+      DATABASE_URL: postgresql://identity_svc:identity_dev@postgres:5432/identity
+      KAFKA_BOOTSTRAP: kafka:9092
+      OUTBOX_METRICS_PORT: "0"
+    depends_on:
+      identity: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+    restart: unless-stopped
 
 volumes:
   pgdata:
+  dyna0:
+  dyna1:
+  dyna2:
+  objects:

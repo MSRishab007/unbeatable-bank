@@ -188,8 +188,9 @@ def test_beneficiary_cooling_period_and_name_masking(conn, ledger, make_customer
 
 
 def test_beneficiary_rejects_typo(conn, make_customer):
-    with pytest.raises(service.AccountError):
-        service.add_beneficiary(conn, make_customer(), payee_account_number="500100000420")
+    with pytest.raises(service.AccountError) as exc:
+        service.add_beneficiary(conn, make_customer(), payee_account_number="500100000421")
+    assert "check digit" in str(exc.value)
 
 
 def test_alias_for_scan_to_pay(conn, ledger, make_customer):
@@ -201,3 +202,65 @@ def test_alias_for_scan_to_pay(conn, ledger, make_customer):
     assert resolved["account_id"] == acct["account_id"] and resolved["display_name"] == "Riya S*****"
     with pytest.raises(service.AccountError):
         service.create_alias(conn, acct["account_id"], "x")
+
+
+# ------------------------------------------------------------------ later additions
+
+
+def test_open_with_supplied_id_is_idempotent(conn, ledger, make_customer):
+    import uuid
+    cid, account_id = make_customer(), uuid.uuid4()
+    first = service.open_account(conn, ledger, product_type="FD", holder_ids=[cid], account_id=account_id,
+                                 actor="system:deposits")
+    again = service.open_account(conn, ledger, product_type="FD", holder_ids=[cid], account_id=account_id,
+                                 actor="system:deposits")
+    assert first["account_number"] == again["account_number"]
+    assert len(service.list_customer_accounts(conn, cid)) == 1
+
+
+def test_idle_days_and_touch(conn, ledger, make_customer):
+    cid = make_customer()
+    acct = service.open_account(conn, ledger, product_type="SAVINGS", holder_ids=[cid], actor=ACTOR)
+    conn.execute("UPDATE account.accounts SET last_activity_at = now() - interval '120 days' "
+                 "WHERE account_id = %s", (acct["account_id"],))
+    assert service.authorize(conn, acct["account_id"], cid)["idle_days"] == 120            # read-only
+    assert service.authorize(conn, acct["account_id"], cid, touch=True)["idle_days"] == 120  # reports, then resets
+    assert service.authorize(conn, acct["account_id"], cid)["idle_days"] == 0
+
+
+def test_customer_sets_own_limits(conn, ledger, make_customer):
+    acct = service.open_account(conn, ledger, product_type="SAVINGS", holder_ids=[make_customer()],
+                                actor=ACTOR)
+    updated = service.update_limits(conn, acct["account_id"], daily_limit=2_000_000, per_txn_limit=500_000,
+                                    actor=ACTOR)
+    assert (updated["daily_limit"], updated["per_txn_limit"]) == (2_000_000, 500_000)
+    with pytest.raises(service.AccountError):  # per-transaction above daily
+        service.update_limits(conn, acct["account_id"], daily_limit=100, per_txn_limit=None, actor=ACTOR)
+    assert service.list_events(conn, acct["account_id"])[0]["event_type"] == "LIMITS_CHANGED"
+    assert service.verify_event_chain(conn, acct["account_id"])
+
+
+def test_payment_precheck(conn, ledger, make_customer):
+    payer, friend = make_customer(), make_customer("Arjun Mehta")
+    mine = service.open_account(conn, ledger, product_type="SAVINGS", holder_ids=[payer], actor=ACTOR)
+    mine2 = service.open_account(conn, ledger, product_type="CURRENT", holder_ids=[payer], actor=ACTOR)
+    theirs = service.open_account(conn, ledger, product_type="SAVINGS", holder_ids=[friend], actor=ACTOR)
+
+    def check(payee):
+        return service.precheck_payment(conn, customer_id=payer, from_account_id=mine["account_id"],
+                                        payee_ref=payee)
+
+    own = check(mine2["account_number"])
+    assert own["auth"]["allowed"] and own["payee_trusted"]                      # own account
+    stranger = check(theirs["account_number"])
+    assert stranger["payee"]["display_name"] == "Arjun M****" and not stranger["payee_trusted"]
+    service.add_beneficiary(conn, payer, payee_account_number=theirs["account_number"])
+    assert not check(theirs["account_number"])["payee_trusted"]                 # saved, but still cooling
+    conn.execute("UPDATE account.beneficiaries SET cooling_until = now() - interval '1 minute' "
+                 "WHERE customer_id = %s", (payer,))
+    assert check(theirs["account_number"])["payee_trusted"]                     # cooling period over
+    typo = theirs["account_number"][:-1] + str((int(theirs["account_number"][-1]) + 1) % 10)
+    assert check(typo)["payee_error"] == "INVALID_PAYEE"
+    assert check("nobody@unbeatable")["payee_error"] == "PAYEE_NOT_FOUND"
+    assert service.precheck_payment(conn, customer_id=friend, from_account_id=mine["account_id"],
+                                    payee_ref=theirs["account_number"])["auth"]["reason"] == "NOT_A_HOLDER"

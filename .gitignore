@@ -27,3 +27,5 @@ vendor/
 .DS_Store
 .idea/
 .vscode/
+.dev/
+.build/

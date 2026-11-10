@@ -1,0 +1,193 @@
+// DynaStore: a Dynamo-style, leaderless, eventually consistent key-value store.
+//
+//   DynaStore  client API, any node can serve any request
+//   Replica    node-to-node replication, failure detection and anti-entropy
+//   Admin      fault injection for demos and tests
+//
+// After editing this file run:  python scripts/gen_protos.py
+
+syntax = "proto3";
+
+package unbeatable.dynastore.v1;
+
+service DynaStore {
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc Put(PutRequest) returns (PutResponse);
+  // Not linearizable: under a partition two callers may both see created = true.
+  // The value converges to the earliest write (first-writer-wins).
+  rpc PutIfAbsent(PutIfAbsentRequest) returns (PutIfAbsentResponse);
+  // CRDT counter (PN-counter). Concurrent increments on different nodes never conflict.
+  rpc Increment(IncrementRequest) returns (IncrementResponse);
+  rpc ClusterStatus(ClusterStatusRequest) returns (ClusterStatusResponse);
+  rpc KeyInfo(KeyInfoRequest) returns (KeyInfoResponse);
+}
+
+// r / w = 0 means "use the cluster default".
+
+message GetRequest {
+  string key = 1;
+  int32 r = 2;
+}
+
+message GetResponse {
+  bool found = 1;
+  string type = 2;              // "register" or "counter"
+  bytes value = 3;              // register: the winning sibling (latest write)
+  repeated bytes siblings = 4;  // register: all concurrent versions
+  string context = 5;           // opaque causal context; pass back on Put
+  int64 counter = 6;            // counter: current value
+  int32 replicas = 7;           // how many replicas answered
+  bool repaired = 8;            // read repair was triggered
+}
+
+message PutRequest {
+  string key = 1;
+  bytes value = 2;
+  string context = 3;           // from a previous Get; empty for a blind write
+  int64 ttl_seconds = 4;        // 0 = never expires
+  int32 w = 5;
+}
+
+message PutResponse {
+  string context = 1;
+  int32 acks = 2;
+  bool sloppy = 3;              // at least one write went to a fallback node (hinted handoff)
+}
+
+message PutIfAbsentRequest {
+  string key = 1;
+  bytes value = 2;
+  int64 ttl_seconds = 3;
+  int32 r = 4;
+  int32 w = 5;
+}
+
+message PutIfAbsentResponse {
+  bool created = 1;
+  bytes value = 2;              // the value now stored (existing one if created = false)
+}
+
+message IncrementRequest {
+  string key = 1;
+  int64 delta = 2;
+  int64 ttl_seconds = 3;
+  int32 w = 4;
+}
+
+message IncrementResponse {
+  int64 value = 1;              // coordinator's view after the increment
+  int32 acks = 2;
+  bool sloppy = 3;
+}
+
+message ClusterStatusRequest {}
+
+message NodeInfo {
+  string node_id = 1;
+  string address = 2;
+  bool alive = 3;               // as seen by the answering node
+  bool is_self = 4;
+}
+
+message ClusterStatusResponse {
+  string node_id = 1;
+  repeated NodeInfo nodes = 2;
+  int32 n = 3;
+  int32 r = 4;
+  int32 w = 5;
+  int64 keys = 6;
+  int64 pending_hints = 7;
+  map<string, int64> stats = 8; // read_repairs, hints_stored, hints_delivered, sync_repairs, ...
+  repeated string blocked_peers = 9;
+  bool simulated_down = 10;
+}
+
+message KeyInfoRequest {
+  string key = 1;
+}
+
+message ReplicaState {
+  string node_id = 1;
+  bool reachable = 2;
+  bool found = 3;
+  int64 counter = 4;
+  int32 siblings = 5;
+  string digest = 6;            // equal digests = replicas agree
+}
+
+message KeyInfoResponse {
+  repeated string preference_list = 1;
+  repeated ReplicaState replicas = 2;
+}
+
+service Replica {
+  rpc Ping(PingRequest) returns (PingResponse);
+  rpc ReplicaGet(ReplicaGetRequest) returns (ReplicaGetResponse);
+  // Merge a value into the local store (CRDT merge / vector-clock reconcile).
+  rpc ReplicaMerge(ReplicaMergeRequest) returns (ReplicaMergeResponse);
+  // Anti-entropy: compare digests, exchange what differs.
+  rpc Sync(SyncRequest) returns (SyncResponse);
+}
+
+message PingRequest {
+  string from_node = 1;
+}
+
+message PingResponse {
+  string node_id = 1;
+}
+
+message ReplicaGetRequest {
+  string from_node = 1;
+  string key = 2;
+}
+
+message ReplicaGetResponse {
+  bool found = 1;
+  string envelope = 2;          // JSON-encoded stored value
+}
+
+message ReplicaMergeRequest {
+  string from_node = 1;
+  string key = 2;
+  string envelope = 3;
+  string hint_for = 4;          // set when the receiver is a stand-in for a down replica
+}
+
+message ReplicaMergeResponse {
+  bool ok = 1;
+}
+
+message KeyDigest {
+  string key = 1;
+  string digest = 2;
+}
+
+message KeyEnvelope {
+  string key = 1;
+  string envelope = 2;
+}
+
+message SyncRequest {
+  string from_node = 1;
+  repeated KeyDigest digests = 2;
+}
+
+message SyncResponse {
+  repeated KeyEnvelope updates = 1;  // responder's versions where they differ
+  repeated string want = 2;          // keys the responder is missing or has an older view of
+}
+
+service Admin {
+  // Simulate failures without killing pods.
+  rpc SetFaults(SetFaultsRequest) returns (SetFaultsResponse);
+}
+
+message SetFaultsRequest {
+  repeated string blocked_peers = 1;  // drop all traffic to and from these nodes (network partition)
+  bool down = 2;                      // behave as if the node has crashed
+}
+
+message SetFaultsResponse {
+  bool ok = 1;
+}

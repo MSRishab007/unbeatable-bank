@@ -108,8 +108,14 @@ def verify_event_chain(conn: psycopg.Connection, account_id: UUID) -> bool:
 
 def create_customer(
     conn: psycopg.Connection, *, full_name: str, date_of_birth: date, phone: str, email: str,
-    pan: str | None = None,
+    pan: str | None = None, customer_id: UUID | None = None,
 ) -> dict:
+    """Pass customer_id (Identity does) to make the call idempotent."""
+    if customer_id is not None:
+        try:
+            return get_customer(conn, customer_id)
+        except NotFound:
+            pass
     pan_hash = pan_last4 = None
     if pan:
         pan = pan.strip().upper()
@@ -120,10 +126,12 @@ def create_customer(
         with conn.transaction(), _cur(conn) as cur:
             cur.execute(
                 """
-                INSERT INTO account.customers (full_name, date_of_birth, phone, email, pan_hash, pan_last4)
-                VALUES (%s, %s, %s, %s, %s, %s) RETURNING *
+                INSERT INTO account.customers
+                    (customer_id, full_name, date_of_birth, phone, email, pan_hash, pan_last4)
+                VALUES (COALESCE(%s, gen_random_uuid()), %s, %s, %s, %s, %s, %s) RETURNING *
                 """,
-                (full_name.strip(), date_of_birth, phone, email.strip().lower(), pan_hash, pan_last4),
+                (customer_id, full_name.strip(), date_of_birth, phone, email.strip().lower(), pan_hash,
+                 pan_last4),
             )
             return _public_customer(cur.fetchone())
     except psycopg.errors.UniqueViolation as e:
@@ -197,9 +205,18 @@ def open_account(
     daily_limit: int | None = None,
     per_txn_limit: int | None = None,
     nickname: str | None = None,
+    account_id: UUID | None = None,
     actor: str,
 ) -> dict:
-    """holder_ids[0] becomes the PRIMARY holder."""
+    """holder_ids[0] becomes the PRIMARY holder.
+
+    Pass account_id to make the call idempotent: opening the same id twice
+    returns the existing account."""
+    if account_id is not None:
+        try:
+            return get_account(conn, account_id)
+        except NotFound:
+            pass
     if not holder_ids or len(holder_ids) > MAX_HOLDERS or len(set(holder_ids)) != len(holder_ids):
         raise AccountError(f"an account needs 1 to {MAX_HOLDERS} distinct holders")
     mode = operating_mode or ("SINGLE" if len(holder_ids) == 1 else "EITHER_OR_SURVIVOR")
@@ -224,7 +241,7 @@ def open_account(
     all_verified = all(c["kyc_status"] == "VERIFIED" for c in customers.values())
     status = "ACTIVE" if all_verified else "PENDING_KYC"
 
-    account_id = uuid4()
+    account_id = account_id or uuid4()
     ledger.open_account(account_id, product_type, overdraft_limit)
     if status != "ACTIVE":
         ledger.set_status(account_id, "DEBIT_BLOCKED")
@@ -318,13 +335,17 @@ def mask_name(full_name: str) -> str:
     return " ".join([parts[0]] + [p[0] + "*" * (len(p) - 1) for p in parts[1:]])
 
 
-def authorize(conn: psycopg.Connection, account_id: UUID, customer_id: UUID) -> dict:
-    """The single check every service uses: may this customer debit this account?"""
+def authorize(conn: psycopg.Connection, account_id: UUID, customer_id: UUID, *, touch: bool = False) -> dict:
+    """The single check every service uses: may this customer debit this account?
+
+    idle_days is how long the account had been unused (dormant-account fraud signal).
+    With touch=True an allowed check also records the activity."""
     with _cur(conn) as cur:
         cur.execute(
             """
-            SELECT a.account_id, a.product_type, a.status AS account_status, a.operating_mode,
-                   a.daily_limit, a.per_txn_limit, a.overdraft_limit,
+            SELECT a.account_id, a.account_number, a.product_type, a.status AS account_status,
+                   a.operating_mode, a.daily_limit, a.per_txn_limit, a.overdraft_limit,
+                   GREATEST(0, EXTRACT(DAY FROM now() - a.last_activity_at))::int AS idle_days,
                    h.role, c.status AS customer_status, c.daily_transfer_limit
             FROM account.accounts a
             JOIN account.account_holders h ON h.account_id = a.account_id AND h.removed_at IS NULL
@@ -335,7 +356,7 @@ def authorize(conn: psycopg.Connection, account_id: UUID, customer_id: UUID) -> 
         )
         row = cur.fetchone()
     if row is None:
-        return {"allowed": False, "reason": "NOT_A_HOLDER"}
+        return {"allowed": False, "reason": "NOT_A_HOLDER", "is_holder": False}
     reason = None
     if row["customer_status"] != "ACTIVE":
         reason = "CUSTOMER_" + row["customer_status"]
@@ -345,7 +366,79 @@ def authorize(conn: psycopg.Connection, account_id: UUID, customer_id: UUID) -> 
         reason = "DEPOSIT_ACCOUNT_NOT_DEBITABLE"  # only the Deposits service moves FD/RD money
     elif row["operating_mode"] == "JOINTLY":
         reason = "NEEDS_ALL_HOLDERS"
-    return {"allowed": reason is None, "reason": reason, **row}
+    if touch and reason is None:
+        conn.execute("UPDATE account.accounts SET last_activity_at = now() WHERE account_id = %s", (account_id,))
+    return {"allowed": reason is None, "reason": reason, "is_holder": True, **row}
+
+
+def precheck_payment(conn: psycopg.Connection, *, customer_id: UUID, from_account_id: UUID,
+                     payee_ref: str) -> dict:
+    """Everything Transaction Intake needs from this service, in one call:
+    may the customer debit the account, who is the payee, and is the payee trusted
+    (the customer's own account, or a saved payee past its cooling period)."""
+    auth = authorize(conn, from_account_id, customer_id, touch=True)
+    out: dict = {"auth": auth, "payee": None, "payee_error": None, "payee_trusted": False}
+    if not auth["allowed"]:
+        return out
+    try:
+        payee = resolve_alias(conn, payee_ref) if "@" in payee_ref else lookup_by_number(conn, payee_ref)
+    except NotFound:
+        out["payee_error"] = "PAYEE_NOT_FOUND"
+        return out
+    except AccountError:
+        out["payee_error"] = "INVALID_PAYEE"
+        return out
+    out["payee"] = payee
+    with _cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT EXISTS (SELECT 1 FROM account.account_holders
+                           WHERE account_id = %(payee)s AND customer_id = %(cust)s AND removed_at IS NULL)
+                OR EXISTS (SELECT 1 FROM account.beneficiaries
+                           WHERE customer_id = %(cust)s AND payee_account_number = %(number)s
+                             AND removed_at IS NULL AND cooling_until <= now()) AS trusted
+            """,
+            {"payee": payee["account_id"], "cust": customer_id, "number": payee["account_number"]},
+        )
+        out["payee_trusted"] = cur.fetchone()["trusted"]
+    return out
+
+
+def update_limits(conn: psycopg.Connection, account_id: UUID, *, daily_limit: int | None,
+                  per_txn_limit: int | None, actor: str) -> dict:
+    """Customers can set their own limits, up to the bank's ceiling."""
+    ceiling = 50_000_000  # Rs 5,00,000
+    for value in (daily_limit, per_txn_limit):
+        if value is not None and not 0 < value <= ceiling:
+            raise AccountError("limit must be between 1 paisa and Rs 5,00,000")
+    try:
+        with conn.transaction(), _cur(conn) as cur:
+            cur.execute("SELECT 1 FROM account.accounts WHERE account_id = %s FOR UPDATE", (account_id,))
+            if cur.fetchone() is None:
+                raise NotFound("account not found")
+            cur.execute(
+                """
+                UPDATE account.accounts
+                SET daily_limit = COALESCE(%s, daily_limit), per_txn_limit = COALESCE(%s, per_txn_limit)
+                WHERE account_id = %s
+                """,
+                (daily_limit, per_txn_limit, account_id),
+            )
+            _record_event(cur, account_id, "LIMITS_CHANGED",
+                          {"daily_limit": daily_limit, "per_txn_limit": per_txn_limit}, actor)
+    except psycopg.errors.CheckViolation as e:
+        raise AccountError("per-transaction limit cannot exceed the daily limit") from e
+    return get_account(conn, account_id)
+
+
+def list_events(conn: psycopg.Connection, account_id: UUID, limit: int = 100) -> list[dict]:
+    with _cur(conn) as cur:
+        cur.execute(
+            "SELECT event_id, event_type, payload, actor, created_at FROM account.account_events "
+            "WHERE account_id = %s ORDER BY event_id DESC LIMIT %s",
+            (account_id, min(limit, 500)),
+        )
+        return cur.fetchall()
 
 
 def add_holder(conn: psycopg.Connection, account_id: UUID, customer_id: UUID, actor: str) -> dict:

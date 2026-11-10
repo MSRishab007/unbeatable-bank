@@ -1,0 +1,40 @@
+# Risk rules. Mounted from a ConfigMap and reloaded without a restart, so rules are
+# changed, reviewed and rolled back through Git (GitOps).
+#
+# Every rule that fires adds its weight to the score (capped at 100):
+#     score <  challenge          -> ALLOW
+#     challenge <= score < hold   -> CHALLENGE  (customer must confirm with an OTP)
+#     hold <= score < block       -> HOLD       (funds reserved, fraud analyst reviews)
+#     score >= block              -> BLOCK
+#
+# Per rule:  enabled: false  switches it off
+#            shadow: true    evaluates and logs it without counting it (try out new rules safely)
+# Amounts are in paise.
+
+bands:
+  challenge: 30
+  hold: 60
+  block: 85
+
+# If the feature store (DynaStore) is unreachable, velocity and history rules cannot run.
+# Payments at or above this amount are then held for review instead of waved through.
+degraded_hold_amount: 2000000        # Rs 20,000
+
+rules:
+  DENY_LIST:                { weight: 100 }
+  VELOCITY_1M:              { weight: 35, threshold: 5 }          # more than 5 attempts a minute
+  VELOCITY_1H:              { weight: 20, threshold: 20 }
+  AMOUNT_ANOMALY:           { weight: 30, multiple: 5, min_history: 5, min_amount: 500000 }
+  HIGH_AMOUNT:              { weight: 10, min_amount: 4000000 }   # Rs 40,000 and up
+  NEW_DEVICE:               { weight: 20, hours: 24 }
+  NEW_PAYEE:                { weight: 10, hours: 24, min_amount: 500000 }
+  ATO_PATTERN:              { weight: 40, min_amount: 1000000 }   # new device + new payee + large amount
+  MICRO_PROBING:            { weight: 60, small_amount: 1000, small_count: 3, min_amount: 500000 }
+  DORMANT_ACCOUNT:          { weight: 55, idle_days: 90, min_amount: 500000 }
+  ODD_HOURS:                { weight: 10, from_hour: 1, to_hour: 5 }  # India time
+  STRUCTURING:              { weight: 60, threshold_amount: 5000000, band_pct: 5, count: 3 }
+  SESSION_NEW_DEVICE_LOGIN: { weight: 10 }                        # set by Identity at login
+  IMPOSSIBLE_TRAVEL:        { weight: 40 }                        # set by Identity at login
+  FD_BREAK_AND_FLEE:        { weight: 35 }                        # set by Deposits on early closure
+  PATTERN_SIGNAL_SENDER:    { weight: 30 }                        # stream analytics flagged the paying account
+  MULE_PAYEE:               { weight: 60 }                        # stream analytics flagged the receiving account

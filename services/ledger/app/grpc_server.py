@@ -7,11 +7,13 @@ from concurrent import futures
 from uuid import UUID
 
 import grpc
+from ubcommon import grpcutil
 from psycopg_pool import ConnectionPool
 
-from . import gen  # noqa: F401  (puts the generated code on sys.path)
+from ubcommon.metrics import GrpcMetricsInterceptor
+from ubproto.ledger.v1 import ledger_pb2, ledger_pb2_grpc
+
 from . import posting
-from ledger.v1 import ledger_pb2, ledger_pb2_grpc  # noqa: E402
 
 log = logging.getLogger("ledger.grpc")
 
@@ -54,6 +56,8 @@ class LedgerServicer(ledger_pb2_grpc.LedgerServiceServicer):
                     legs=legs,
                     description=request.description or None,
                     metadata=dict(request.metadata),
+                    capture_hold_id=(_uuid(context, request.capture_hold_id, "capture_hold_id")
+                                     if request.capture_hold_id else None),
                 )
         except posting.LedgerError as e:
             _abort(context, e)
@@ -81,8 +85,35 @@ class LedgerServicer(ledger_pb2_grpc.LedgerServiceServicer):
         )
 
 
+    def CreateHold(self, request, context):
+        account_id = _uuid(context, request.account_id, "account_id")
+        try:
+            with self.pool.connection() as conn:
+                hold = posting.create_hold(conn, account_id=account_id, amount=request.amount,
+                                           idempotency_key=request.idempotency_key,
+                                           reason=request.reason or "hold")
+        except posting.LedgerError as e:
+            _abort(context, e)
+        return _hold(hold)
+
+    def ReleaseHold(self, request, context):
+        hold_id = _uuid(context, request.hold_id, "hold_id")
+        try:
+            with self.pool.connection() as conn:
+                hold = posting.release_hold(conn, hold_id)
+        except posting.LedgerError as e:
+            _abort(context, e)
+        return _hold(hold)
+
+
+def _hold(hold: dict) -> ledger_pb2.Hold:
+    return ledger_pb2.Hold(hold_id=str(hold["hold_id"]), account_id=str(hold["account_id"]),
+                           amount=hold["amount"], status=hold["status"])
+
+
 def start(pool: ConnectionPool, port: int, max_workers: int = 10) -> grpc.Server:
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=max_workers))
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=max_workers), options=grpcutil.SERVER_OPTIONS,
+                         interceptors=[GrpcMetricsInterceptor("ledger")])
     ledger_pb2_grpc.add_LedgerServiceServicer_to_server(LedgerServicer(pool), server)
     bound = server.add_insecure_port(f"[::]:{port}")
     server.start()

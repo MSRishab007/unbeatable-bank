@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ubcommon"
+version = "0.1.0"
+description = "Shared code for Unbeatable Bank services: logging, metrics, auth, outbox relay, gRPC stubs"
+requires-python = ">=3.11"
+dependencies = [
+    "prometheus-client==0.21.1",
+    "PyJWT==2.10.1",
+    "grpcio==1.68.1",
+    "protobuf==5.29.6",
+]
+
+[project.optional-dependencies]
+kafka = ["confluent-kafka==2.6.1"]
+gcp = [
+    "google-cloud-firestore==2.19.0",
+    "google-cloud-pubsub==2.27.1",
+    "google-cloud-storage==2.19.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["ubcommon*", "ubproto*"]

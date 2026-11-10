@@ -523,6 +523,80 @@ def release_hold(conn: psycopg.Connection, hold_id: UUID, *, status: str = "RELE
         return hold
 
 
+# --------------------------------------------------------------------------- savings interest
+
+
+def accrue_savings_interest(conn: psycopg.Connection, *, business_date: date, annual_rate: str) -> dict:
+    """Daily accrual on the end-of-day balance of every savings account.
+
+    Interest builds up in `accrued_interest` (fractional paise) and is only
+    rounded when it is posted. Idempotent per business date."""
+    with conn.transaction(), _cursor(conn) as cur:
+        cur.execute(
+            "INSERT INTO ledger.accrual_runs (business_date, annual_rate, accounts) VALUES (%s, %s, 0) "
+            "ON CONFLICT (business_date) DO NOTHING RETURNING business_date",
+            (business_date, annual_rate),
+        )
+        if cur.fetchone() is None:
+            cur.execute("SELECT accounts FROM ledger.accrual_runs WHERE business_date = %s", (business_date,))
+            return {"business_date": business_date, "accounts": cur.fetchone()["accounts"], "replayed": True}
+        cur.execute(
+            """
+            UPDATE ledger.balances
+            SET accrued_interest = accrued_interest + ledger_balance * %s::numeric / 365
+            WHERE kind = 'CUSTOMER' AND product_type = 'SAVINGS' AND status <> 'CLOSED'
+              AND ledger_balance > 0
+            """,
+            (annual_rate,),
+        )
+        accounts = cur.rowcount
+        cur.execute("UPDATE ledger.accrual_runs SET accounts = %s WHERE business_date = %s",
+                    (accounts, business_date))
+    return {"business_date": business_date, "accounts": accounts, "replayed": False}
+
+
+def post_savings_interest(conn: psycopg.Connection, *, business_date: date) -> dict:
+    """Credit accrued interest (whole paise) to each savings account. Idempotent per date."""
+    from .internal_accounts import INTEREST_EXPENSE
+
+    with _cursor(conn) as cur:
+        cur.execute(
+            "SELECT account_id, floor(accrued_interest)::bigint AS amount FROM ledger.balances "
+            "WHERE kind = 'CUSTOMER' AND product_type = 'SAVINGS' AND accrued_interest >= 1 "
+            "AND status <> 'CLOSED' ORDER BY account_id"
+        )
+        due = cur.fetchall()
+    posted = total = 0
+    for row in due:
+        with conn.transaction():
+            result = post_journal(
+                conn,
+                idempotency_key=f"sav-int:{row['account_id']}:{business_date.isoformat()}",
+                txn_type="INTEREST",
+                legs=[Leg(INTEREST_EXPENSE, -row["amount"]), Leg(row["account_id"], row["amount"])],
+                description=f"Savings interest up to {business_date.isoformat()}",
+                business_date=business_date,
+            )
+            if not result.replayed:
+                conn.execute(
+                    "UPDATE ledger.balances SET accrued_interest = accrued_interest - %s WHERE account_id = %s",
+                    (row["amount"], row["account_id"]),
+                )
+                posted += 1
+                total += row["amount"]
+    return {"business_date": business_date, "accounts": posted, "total_paise": total}
+
+
+def get_balances(conn: psycopg.Connection, account_ids: list[UUID]) -> list[dict]:
+    with _cursor(conn) as cur:
+        cur.execute(
+            "SELECT account_id, status, product_type, ledger_balance, available_balance, overdraft_limit, "
+            "accrued_interest FROM ledger.balances WHERE account_id = ANY(%s)",
+            (account_ids,),
+        )
+        return cur.fetchall()
+
+
 # --------------------------------------------------------------------------- reconciliation
 
 

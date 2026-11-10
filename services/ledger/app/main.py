@@ -15,6 +15,9 @@ from fastapi import Depends, FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from ubcommon.logging_setup import setup_logging
+from ubcommon.metrics import instrument
+
 from . import grpc_server, posting
 from .db import close_pool, init_pool
 
@@ -30,7 +33,9 @@ async def lifespan(_: FastAPI):
     close_pool()
 
 
+setup_logging("ledger")
 app = FastAPI(title="Ledger Service", version="0.1.0", lifespan=lifespan)
+instrument(app, "ledger")
 
 
 def get_conn():
@@ -74,6 +79,15 @@ class JournalIn(BaseModel):
     metadata: dict = Field(default_factory=dict)
     business_date: date | None = None
     capture_hold_id: UUID | None = None
+
+
+class AccrueIn(BaseModel):
+    business_date: date
+    annual_rate: str = Field(..., pattern=r"^0(\.\d{1,6})?$", examples=["0.035"])
+
+
+class PostInterestIn(BaseModel):
+    business_date: date
 
 
 class ReverseIn(BaseModel):
@@ -182,3 +196,23 @@ def release_hold(hold_id: UUID, conn=Depends(get_conn)):
 @app.get("/v1/reconciliation")
 def reconciliation(conn=Depends(get_conn)):
     return posting.reconcile(conn)
+
+
+@app.get("/v1/balances")
+def balances(ids: str, conn=Depends(get_conn)):
+    """Batch balance lookup: ?ids=<uuid>,<uuid>,..."""
+    try:
+        account_ids = [UUID(i) for i in ids.split(",") if i]
+    except ValueError:
+        raise posting.InvalidJournal("ids must be comma-separated UUIDs")
+    return posting.get_balances(conn, account_ids[:200])
+
+
+@app.post("/v1/eod/accrue-savings")
+def accrue_savings(body: AccrueIn, conn=Depends(get_conn)):
+    return posting.accrue_savings_interest(conn, business_date=body.business_date, annual_rate=body.annual_rate)
+
+
+@app.post("/v1/eod/post-savings-interest")
+def post_savings_interest(body: PostInterestIn, conn=Depends(get_conn)):
+    return posting.post_savings_interest(conn, business_date=body.business_date)

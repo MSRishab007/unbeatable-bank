@@ -3,9 +3,9 @@ import uuid
 import grpc
 import pytest
 
+from ubproto.ledger.v1 import ledger_pb2, ledger_pb2_grpc
+
 from app import grpc_server, internal_accounts
-import app.gen  # noqa: F401  (puts generated code on sys.path)
-from ledger.v1 import ledger_pb2, ledger_pb2_grpc
 
 
 @pytest.fixture(scope="module")
@@ -50,3 +50,22 @@ def test_error_codes_over_grpc(stub, make_account):
 
 def test_internal_account_reachable(stub):
     assert stub.GetBalance(ledger_pb2.GetBalanceRequest(account_id=str(internal_accounts.CASH))).status == "OPEN"
+
+
+def test_hold_capture_and_release_over_grpc(stub, make_account):
+    a, b = make_account(1_000), make_account()
+    key = str(uuid.uuid4())
+    hold = stub.CreateHold(ledger_pb2.CreateHoldRequest(idempotency_key=key, account_id=str(a), amount=800,
+                                                        reason="fraud review"))
+    again = stub.CreateHold(ledger_pb2.CreateHoldRequest(idempotency_key=key, account_id=str(a), amount=800))
+    assert hold.status == "ACTIVE" and again.hold_id == hold.hold_id
+    assert stub.GetBalance(ledger_pb2.GetBalanceRequest(account_id=str(a))).available_balance == 200
+    stub.PostJournal(ledger_pb2.PostJournalRequest(
+        idempotency_key=str(uuid.uuid4()), txn_type="TRANSFER", legs=[leg(a, -800), leg(b, 800)],
+        capture_hold_id=hold.hold_id))
+    assert stub.GetBalance(ledger_pb2.GetBalanceRequest(account_id=str(a))).ledger_balance == 200
+
+    hold2 = stub.CreateHold(ledger_pb2.CreateHoldRequest(idempotency_key=str(uuid.uuid4()),
+                                                         account_id=str(a), amount=150))
+    assert stub.ReleaseHold(ledger_pb2.ReleaseHoldRequest(hold_id=hold2.hold_id)).status == "RELEASED"
+    assert stub.GetBalance(ledger_pb2.GetBalanceRequest(account_id=str(a))).available_balance == 200

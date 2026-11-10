@@ -1,74 +1,82 @@
 # Services
 
-All services are Python 3.12 (FastAPI). Each folder is self-contained:
+All services are Python 3.12. Each folder is self-contained and they share one
+library, `libs/common` (auth, metrics, logging, outbox, Kafka, Pub/Sub, stores,
+gRPC stubs). One Dockerfile builds every image:
+
+```bash
+docker build -f services/Dockerfile --build-arg SERVICE=ledger -t ledger .   # from the repo root
+```
 
 ```
 services/<name>/
-├── app/                 # service code
-├── migrations/          # Alembic migrations for this service's own DB schema
-├── tests/               # pytest, runs against a real Postgres
-├── Dockerfile           # same image serves the API and runs migrations
-├── requirements.txt
-└── requirements-dev.txt
+├── app/                 # service code (app/main.py is the API)
+├── migrations/          # Alembic migrations for this service's own schema (if it has a database)
+├── config/              # rate-limit policies / risk rules (mounted from a ConfigMap on Kubernetes)
+├── tests/               # pytest; database tests run against a real Postgres
+└── requirements*.txt
 ```
 
-| Service | Port (local) | Owns schema | Status |
+| Service | Interfaces | Data | What it does |
 |---|---|---|---|
-| Ledger | 8081 (REST), 50051 (gRPC) | `core_banking.ledger` | Balances, journals, entries, holds, outbox |
-| Account | 8082 | `core_banking.account` | Customers, accounts, joint holders, payees, aliases |
-| Transaction Intake | 8083 | `core_banking.intake` | Payment requests, decisions, limits, outbox |
+| `gateway` | REST (public) | none | Verifies JWTs, checks roles and ownership, routes `/api/...`, serves the web app |
+| `identity` | REST | Postgres `identity`, document store | Sign-up, login, devices, sessions, OTP, staff |
+| `account` | REST | Postgres `core_banking.account` | Customers, accounts, joint holders, limits, freeze, payees, aliases, audit chain |
+| `ledger` | REST + gRPC :50051 | Postgres `core_banking.ledger` | Double-entry journals, balances, holds, interest, reconciliation |
+| `intake` | REST | Postgres `core_banking.intake` | Payment admission pipeline: idempotency, limits, risk decision, OTP, holds |
+| `ratelimit` | REST + gRPC :50052 | DynaStore | Sliding-window rate limits shared by all pods |
+| `risk` | REST + gRPC :50053 | DynaStore | Real-time risk scoring from `config/rules.yaml` |
+| `fraud` | REST, Kafka consumer | Postgres `cases`, document store | Alerts, auto-freeze, cases, maker-checker, customer inbox |
+| `deposits` | REST | Postgres `core_banking.deposits`, object store | FD, RD, rate cards, end-of-day batch, bank calendar |
+| `dynastore` | REST + gRPC :7000 | local disk (SQLite) | The leaderless key-value store |
+| `audit-analytics` | Flink SQL job | Kafka | Windowed aggregations; see its README |
 
-How they talk: Intake → Account over **REST**, Intake → Ledger over **gRPC**
-(contract in `proto/ledger/v1/ledger.proto`). Every service writes events to an
-outbox table that will be relayed to **Kafka**.
+The Notification Service is in `functions/notification` (Cloud Function).
 
-## Run everything locally (Windows, macOS, Linux)
+How they talk: clients → gateway → services over **REST**; Intake → Rate Limit,
+Risk and Ledger over **gRPC** (`proto/`); events through a transactional
+**outbox** to **Kafka**; notifications through **Pub/Sub**.
 
-Needs Docker Desktop.
+## Run everything locally
 
-```powershell
-docker compose up --build
-```
-
-Then open http://localhost:8081/docs (Ledger), http://localhost:8082/docs (Account)
-and http://localhost:8083/docs (Intake). To run the end-to-end check:
-
-```powershell
-pip install httpx
+```bash
+docker compose up --build        # from the repo root
 python scripts/smoke_test.py
 ```
 
-If you ran `docker compose` before a new service was added, reset the local
-database once so the new database users get created: `docker compose down -v`.
+The gateway is on http://localhost:8080 (API docs at `/api/docs`). Individual
+services are not published; to poke at one, add a `ports:` entry in
+`docker-compose.yml` or use `scripts/dev_stack.py`, which runs every service on
+its own local port (8081-8088) without Docker.
 
-## Run a service's tests
+Locally, Firestore, Pub/Sub and Cloud Storage are replaced by Postgres-backed,
+in-process and folder-backed stand-ins (`DOCSTORE`, `PUBSUB`, `OBJSTORE`).
 
-```powershell
+## Run one service's tests
+
+```bash
 docker compose up -d postgres
-cd services\ledger
-python -m venv .venv
-.venv\Scripts\activate           # macOS/Linux: source .venv/bin/activate
+cd services/ledger
 pip install -r requirements-dev.txt
 pytest -q
 ```
 
-Tests create and drop their own throwaway database. They also run on every
-pull request in GitHub Actions (`.github/workflows/ci.yml`).
+Tests create and drop their own throwaway database. The concurrency tests open
+many connections; if Postgres refuses them, raise `max_connections` (the
+compose file already does).
 
 ## Database rules
 
 - One database user per service; a service can only see its own schema.
 - Services never join across each other's tables; they call each other's APIs.
-- Schema changes are new Alembic migrations, never edits to old ones.
-  On Kubernetes, ArgoCD runs `alembic upgrade head` as a PreSync Job before
-  rolling out new pods, so schema changes go through Git like everything else.
+- Schema changes are new Alembic migrations, never edits to old ones. On
+  Kubernetes, ArgoCD runs `alembic upgrade head` as a PreSync Job before rolling
+  out new pods.
 - Money is always `bigint` paise. Only the Ledger service changes balances.
 
-## Adding a migration
-
-```powershell
-cd services\account
-$env:DATABASE_URL = "postgresql://account_svc:account_dev@localhost:5432/core_banking"
+```bash
+cd services/account
+export DATABASE_URL=postgresql://account_svc:account_dev@localhost:5432/core_banking
 alembic revision -m "add nominee address"     # then write the SQL in the new file
 alembic upgrade head
 ```
@@ -77,9 +85,13 @@ alembic upgrade head
 
 Edit the file under `proto/`, then regenerate the committed stubs:
 
-```powershell
+```bash
 pip install grpcio-tools==1.68.1
 python scripts/gen_protos.py
 ```
 
-CI fails if the stubs don't match the `.proto` files.
+## Changing how a service is deployed
+
+Edit `scripts/gen_manifests.py` (replicas, autoscaling, environment) and run it;
+commit the regenerated files under `deploy/bank`. CI fails if stubs or
+manifests are out of date.

@@ -1,11 +1,32 @@
 Unbeatable Bank - CS/SS G527 Cloud Computing - Task Division
+Scenario: Banking Transaction Monitoring. Concept: Leaderless replication / Dynamo-like storage.
 
-ID No.          Name            Tasks (a-h)                     Services
--------------   -------------   -----------------------------   ------------------------------------------------
-                (M1)            (a) IaC, (d) GitOps             Identity & Auth, Account, Ledger, Deposits
-                (M2)            (b) Serverless + comms,         Transaction Intake, Notification,
-                                (c) GKE HPA + load test         Rules & Policy, Interest & EOD Engine
-                (M3)            (f) Leaderless/Dynamo concept,  DynaStore, Rate Limit Coordinator,
-                                (g) Storage                     Risk Detection
-                (M4)            (e) Flink stream processing,    Audit Analytics (Flink), Fraud Alert,
-                                (h) Observability               Case Management
+Fill in the ID numbers and names. Each member owns two requirement tasks (a-h) and three services.
+
+ID No.          Name            Tasks (a-h)                           Services
+-------------   -------------   -----------------------------------   ---------------------------------------------
+                                (a) Infrastructure as Code            Identity & Auth
+                                (d) GitOps (ArgoCD)                   Account
+                                                                      Ledger
+
+                                (b) Serverless function + REST/gRPC/  API Gateway
+                                    message queues                    Transaction Intake
+                                (c) GKE, HPA and load testing         Notification Service (Cloud Function)
+
+                                (f) Concept: Dynamo-like store        DynaStore
+                                (g) Storage products                  Rate Limit Coordinator
+                                                                      Risk Detection
+
+                                (e) Flink stream processing           Audit Analytics (Flink on Dataproc)
+                                (h) Observability                     Fraud Alert (alerts, cases)
+                                                                      Deposits & End-of-day
+
+Where each task lives in the repository:
+  (a) infra/bootstrap, infra/main, infra/platform, Makefile
+  (b) functions/notification, proto/, libs/common/ubcommon/outbox.py, kafka.py, pubsub.py
+  (c) deploy/bank (HPAs), loadtest/payments.js
+  (d) deploy/argocd, deploy/bank, .github/workflows/release.yml
+  (e) services/audit-analytics, infra/main/dataproc.tf
+  (f) services/dynastore, services/ratelimit, docs/design.md section 6
+  (g) infra/main/sql.tf, storage.tf, libs/common/ubcommon/docstore.py, objstore.py
+  (h) deploy/monitoring, deploy/argocd/apps/monitoring.yaml, libs/common/ubcommon/metrics.py, logging_setup.py

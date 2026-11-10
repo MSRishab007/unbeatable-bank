@@ -16,6 +16,9 @@ from fastapi.responses import JSONResponse
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, EmailStr, Field
 
+from ubcommon.logging_setup import setup_logging
+from ubcommon.metrics import instrument
+
 from . import service
 from .ledger_client import HttpLedgerClient, LedgerClient, LedgerUnavailable
 
@@ -33,7 +36,9 @@ async def lifespan(app: FastAPI):
     _state["pool"].close()
 
 
+setup_logging("account")
 app = FastAPI(title="Account Service", version="0.1.0", lifespan=lifespan)
+instrument(app, "account")
 
 
 def get_conn():
@@ -64,6 +69,7 @@ def ledger_unavailable(_: Request, exc: LedgerUnavailable):
 
 
 class CustomerIn(BaseModel):
+    customer_id: UUID | None = None   # supplied by Identity so a retried sign-up is the same customer
     full_name: str
     date_of_birth: date
     phone: str = Field(..., examples=["+919876543210"])
@@ -81,7 +87,19 @@ class AccountIn(BaseModel):
     nickname: str | None = None
 
 
+class LimitsIn(BaseModel):
+    daily_limit: int | None = Field(None, gt=0)
+    per_txn_limit: int | None = Field(None, gt=0)
+
+
+class PrecheckIn(BaseModel):
+    customer_id: UUID
+    from_account_id: UUID
+    payee: str
+
+
 class DepositAccountIn(BaseModel):
+    account_id: UUID | None = None   # supplied by Deposits so retries don't open two accounts
     product_type: Literal["FD", "RD"]
     holder_ids: list[UUID] = Field(..., min_length=1, max_length=4)
     nickname: str | None = None
@@ -183,6 +201,16 @@ def unfreeze(account_id: UUID, conn=Depends(get_conn), ledger=Depends(get_ledger
     return service.unfreeze_account(conn, ledger, account_id, actor=actor)
 
 
+@app.patch("/v1/accounts/{account_id}/limits")
+def update_limits(account_id: UUID, body: LimitsIn, conn=Depends(get_conn), actor=Depends(get_actor)):
+    return service.update_limits(conn, account_id, actor=actor, **body.model_dump())
+
+
+@app.get("/v1/accounts/{account_id}/events")
+def account_events(account_id: UUID, limit: int = 100, conn=Depends(get_conn)):
+    return service.list_events(conn, account_id, limit)
+
+
 @app.post("/v1/accounts/{account_id}/alias", status_code=201)
 def create_alias(account_id: UUID, body: AliasIn, conn=Depends(get_conn)):
     return service.create_alias(conn, account_id, body.alias)
@@ -199,6 +227,18 @@ def resolve_alias(alias: str, conn=Depends(get_conn)):
 @app.get("/internal/v1/accounts/{account_id}/authorize/{customer_id}")
 def authorize(account_id: UUID, customer_id: UUID, conn=Depends(get_conn)):
     return service.authorize(conn, account_id, customer_id)
+
+
+@app.post("/internal/v1/accounts/{account_id}/authorize/{customer_id}")
+def authorize_debit(account_id: UUID, customer_id: UUID, conn=Depends(get_conn)):
+    """Same check, and records the activity (used by Transaction Intake before a payment)."""
+    return service.authorize(conn, account_id, customer_id, touch=True)
+
+
+@app.post("/internal/v1/payments/precheck")
+def precheck(body: PrecheckIn, conn=Depends(get_conn)):
+    return service.precheck_payment(conn, customer_id=body.customer_id,
+                                    from_account_id=body.from_account_id, payee_ref=body.payee.strip().lower())
 
 
 @app.post("/internal/v1/deposit-accounts", status_code=201)

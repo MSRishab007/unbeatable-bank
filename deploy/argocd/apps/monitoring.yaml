@@ -1,0 +1,90 @@
+# Metrics: Prometheus + Grafana. Logs go to Cloud Logging (GKE and Dataproc both
+# ship there automatically), so there is no logging stack to run in the cluster.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://prometheus-community.github.io/helm-charts
+    chart: kube-prometheus-stack
+    targetRevision: 66.*
+    helm:
+      valuesObject:
+        alertmanager:
+          enabled: false
+        # Control-plane components are managed by GKE and cannot be scraped.
+        kubeEtcd:
+          enabled: false
+        kubeControllerManager:
+          enabled: false
+        kubeScheduler:
+          enabled: false
+        kubeProxy:
+          enabled: false
+        grafana:
+          # Demo only: Grafana is reachable solely through `make grafana` (port-forward).
+          adminPassword: unbeatable
+          defaultDashboardsTimezone: browser
+          sidecar:
+            dashboards:
+              enabled: true
+              searchNamespace: ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 192Mi
+        prometheus:
+          prometheusSpec:
+            retention: 2d
+            scrapeInterval: 15s
+            resources:
+              requests:
+                cpu: 100m
+                memory: 512Mi
+              limits:
+                memory: 1500Mi
+            # Scrape every bank pod that carries prometheus.io/scrape: "true".
+            additionalScrapeConfigs:
+              - job_name: bank-pods
+                kubernetes_sd_configs:
+                  - role: pod
+                    namespaces:
+                      names: [bank]
+                relabel_configs:
+                  - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+                    action: keep
+                    regex: "true"
+                  - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+                    action: replace
+                    target_label: __metrics_path__
+                    regex: (.+)
+                  - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+                    action: replace
+                    regex: ([^:]+)(?::\d+)?;(\d+)
+                    replacement: $1:$2
+                    target_label: __address__
+                  - source_labels: [__meta_kubernetes_pod_label_app]
+                    target_label: app
+                  - source_labels: [__meta_kubernetes_pod_name]
+                    target_label: pod
+                  - source_labels: [__meta_kubernetes_namespace]
+                    target_label: namespace
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 20
+      backoff:
+        duration: 20s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

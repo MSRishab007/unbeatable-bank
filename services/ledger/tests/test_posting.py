@@ -254,3 +254,26 @@ def test_books_balance(conn, make_account):
     report = reconcile(conn)
     assert report["balanced"], report
     assert internal_accounts.CASH  # internal accounts seeded
+
+
+# ------------------------------------------------------------------ savings interest
+
+
+def test_savings_interest_accrues_daily_and_posts_once(conn, make_account):
+    from datetime import date, timedelta
+    from app.posting import accrue_savings_interest, post_savings_interest
+
+    acct = make_account(3_650_000)  # Rs 36,500 at 3.65% -> exactly Rs 3.65 (365 paise) a day
+    start = date(2030, 1, 1) + timedelta(days=int(uuid.uuid4().int % 20000))  # unique dates per run
+    for day in range(10):
+        first = accrue_savings_interest(conn, business_date=start + timedelta(days=day), annual_rate="0.0365")
+        again = accrue_savings_interest(conn, business_date=start + timedelta(days=day), annual_rate="0.0365")
+        assert not first["replayed"] and again["replayed"]  # rerunning EOD doesn't accrue twice
+    assert get_balance(conn, acct)["accrued_interest"] == 3650
+
+    end = start + timedelta(days=9)
+    post_savings_interest(conn, business_date=end)
+    post_savings_interest(conn, business_date=end)  # rerun: no double credit
+    b = get_balance(conn, acct)
+    assert b["ledger_balance"] == 3_650_000 + 3650 and b["accrued_interest"] == 0
+    assert reconcile(conn)["balanced"]

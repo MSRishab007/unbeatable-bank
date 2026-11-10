@@ -108,6 +108,25 @@ def test_client_fails_over_to_a_healthy_node(cluster):
         assert client.get("failover").value == b"ok"
 
 
+def test_a_hung_node_does_not_fail_writes_or_slow_everything_down(cluster):
+    """A node that accepts connections but never replies (what `docker compose stop`
+    or a frozen pod looks like) times out instead of refusing. Counter updates must
+    still succeed through another node, and after the first timeout the client must
+    stop waiting on the hung node for every request."""
+    import time
+
+    cluster.hang("node-0")
+    client = cluster.client("node-0", "node-1", "node-2", timeout=0.5)   # the hung node is a coordinator choice
+    started = time.monotonic()
+    for i in range(30):
+        assert client.incr("hung-counter", 1) >= i + 1         # every update succeeds
+        client.put(f"hung-key-{i}", "v")
+        assert client.get(f"hung-key-{i}").value == b"v"
+    elapsed = time.monotonic() - started
+    assert elapsed < 3.0, f"90 calls took {elapsed:.1f}s: the client keeps waiting on the hung node"
+    assert 30 <= client.counter("hung-counter") <= 31       # at most one double count, from the first timeout
+
+
 def test_simulated_crash_via_admin(cluster):
     """The demo switch: mark a node down without killing the process."""
     cluster.nodes["node-3"].set_faults([], down=True)

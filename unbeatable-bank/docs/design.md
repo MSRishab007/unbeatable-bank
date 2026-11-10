@@ -235,6 +235,14 @@ When DynaStore cannot be reached at all, the system degrades by amount instead o
 failing: small payments are still admitted (fail open), large ones are refused by
 the rate limiter or held by the risk engine (fail closed).
 
+**Clients and failed nodes.** Services reach DynaStore through any node, which
+coordinates the request. A node that refuses or times out is skipped for a few
+seconds, so a hung node (a frozen process, or a stopped container whose name no
+longer resolves) costs one timeout rather than one per request. Counter updates
+are retried on another node after a timeout. That may count one attempt twice,
+which is harmless for rate limits and velocity rules; failing the payment is not.
+`test_a_hung_node_does_not_fail_writes_or_slow_everything_down` covers this.
+
 ## 7. Storage
 
 | Product | What is stored | Why this product |

@@ -10,7 +10,7 @@ desktop and a phone-sized screen, and fails on any JavaScript error.
 """
 
 from __future__ import annotations
- 
+
 import argparse
 import os
 import re

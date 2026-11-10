@@ -18,6 +18,10 @@ There is no Kafka in this mode: the outbox relays POST events straight to the
 Fraud Alert service instead (OUTBOX_HTTP_SINKS). Docker Compose and GKE use Kafka.
 
 The web/API entry point is the gateway: http://localhost:8080/api/docs
+
+A DynaStore node may be killed (kill <pid>) or frozen (kill -STOP <pid>) to show the
+bank keeps working; the rest keeps running. Bring a killed node back with
+`touch .dev/restart-dyna-1` (or kill -CONT for a frozen one).
 """
 
 from __future__ import annotations
@@ -139,14 +143,29 @@ def main() -> None:
               {"DATABASE_URL": SERVICES[service][2]["DATABASE_URL"], "OUTBOX_HTTP_SINKS": sinks,
                "OUTBOX_METRICS_PORT": "0"})
     print("\nAll services are up. API: http://127.0.0.1:8080/api/docs   logs: .dev/logs/   Ctrl+C to stop")
+    down: set[str] = set()
     try:
         while True:
             time.sleep(1)
             for name, p in procs:
-                if p.poll() is not None:
+                if p.poll() is not None and name not in down:
                     print(f"{name} exited with code {p.returncode}; see .dev/logs/{name}.log")
-                    stop_all()
-                    sys.exit(1)
+                    if not name.startswith("dyna-"):
+                        stop_all()
+                        sys.exit(1)
+                    # A DynaStore node going away is a failure the bank must survive (and a demo).
+                    down.add(name)
+                    print(f"  the rest keeps running; bring it back with: touch {RUN_DIR / ('restart-' + name)}")
+            for name in list(down):
+                flag = RUN_DIR / f"restart-{name}"
+                if flag.exists():
+                    flag.unlink()
+                    folder, port, env = SERVICES[name]
+                    procs[:] = [(n, p) for n, p in procs if n != name]
+                    start(name, [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1",
+                                 "--port", str(port), "--log-level", "warning"], ROOT / "services" / folder, env)
+                    down.discard(name)
+                    print(f"{name} restarted")
     except KeyboardInterrupt:
         print("\nstopping ...")
         stop_all()

@@ -215,16 +215,26 @@ check("account history hash chain is intact", audit.get("chain_valid") is True, 
 # ---------------------------------------------------------------------------------------------
 print("7. DynaStore: a node fails, payments continue")
 status = G.get("/api/staff/ops/dynastore", headers=ADMIN).json()
-check(f"ring has {len(status.get('nodes', []))} nodes, N={status.get('n')} R={status.get('r')} W={status.get('w')}",
-      len(status.get("nodes", [])) >= 3 and all(n["alive"] for n in status["nodes"]), status)
-down = G.post("/api/staff/ops/dynastore/faults", headers=ADMIN, json={"blocked_peers": [], "down": True})
-check("one node switched off (fault injection)", down.status_code == 200 and down.json().get("simulated_down"), down.text)
+nodes = status.get("nodes", [])
+already_down = [n["node_id"] for n in nodes if not n["alive"]]
+check(f"ring has {len(nodes)} nodes, N={status.get('n')} R={status.get('r')} W={status.get('w')}",
+      len(nodes) >= 3 and len(already_down) <= 1, status)
 carol = new_customer("Carol Dsouza", ADMIN, balance=5_000 * RS)
-r = pay(carol["H"], carol["account_id"], arjun["number"], 300 * RS)
-check("payment still completes with a DynaStore node down", r.json().get("status") == "COMPLETED", r.text)
-G.post("/api/staff/ops/dynastore/faults", headers=ADMIN, json={"blocked_peers": [], "down": False})
-healed = wait_for(lambda: all(n["alive"] for n in G.get("/api/staff/ops/dynastore", headers=ADMIN).json()["nodes"]))
-check("node is back and the ring is healthy", bool(healed))
+if already_down:
+    # Someone stopped a node by hand (docker compose stop dyna-1). Switching off a second
+    # one would leave 1 of 3 and no write quorum, so test against the failure that is there.
+    print(f"  note  {', '.join(already_down)} is already down: testing payments against that failure")
+    for i in range(3):
+        r = pay(carol["H"], carol["account_id"], arjun["number"], 300 * RS)
+        check(f"payment {i + 1} of 3 completes with {already_down[0]} down", r.json().get("status") == "COMPLETED", r.text)
+else:
+    down = G.post("/api/staff/ops/dynastore/faults", headers=ADMIN, json={"blocked_peers": [], "down": True})
+    check("one node switched off (fault injection)", down.status_code == 200 and down.json().get("simulated_down"), down.text)
+    r = pay(carol["H"], carol["account_id"], arjun["number"], 300 * RS)
+    check("payment still completes with a DynaStore node down", r.json().get("status") == "COMPLETED", r.text)
+    G.post("/api/staff/ops/dynastore/faults", headers=ADMIN, json={"blocked_peers": [], "down": False})
+    healed = wait_for(lambda: all(n["alive"] for n in G.get("/api/staff/ops/dynastore", headers=ADMIN).json()["nodes"]))
+    check("node is back and the ring is healthy", bool(healed))
 
 # ---------------------------------------------------------------------------------------------
 print("8. Deposits and end-of-day (Deposits + EOD engine -> Ledger)")

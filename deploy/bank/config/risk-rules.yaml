@@ -14,7 +14,7 @@
 bands:
   challenge: 30
   hold: 60
-  block: 85
+  block: 95
 
 # If the feature store (DynaStore) is unreachable, velocity and history rules cannot run.
 # Payments at or above this amount are then held for review instead of waved through.

@@ -8,6 +8,7 @@ leaderless store, built on Google Cloud for CS/SS G527 Cloud Computing (BITS Pil
 - **Design document:** [docs/design.md](docs/design.md)
 - **Deploying to GCP and the demo script:** [docs/DEPLOY.md](docs/DEPLOY.md)
 - **Who did what:** [docs/task_division.txt](docs/task_division.txt)
+- **What comes next:** [docs/ROADMAP.md](docs/ROADMAP.md)
 
 ## What is in here
 

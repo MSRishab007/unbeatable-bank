@@ -1,0 +1,15 @@
+Metadata-Version: 2.4
+Name: ubcommon
+Version: 0.1.0
+Summary: Shared code for Unbeatable Bank services: logging, metrics, auth, outbox relay, gRPC stubs
+Requires-Python: >=3.11
+Requires-Dist: prometheus-client==0.21.1
+Requires-Dist: PyJWT==2.10.1
+Requires-Dist: grpcio==1.68.1
+Requires-Dist: protobuf==5.29.6
+Provides-Extra: kafka
+Requires-Dist: confluent-kafka==2.6.1; extra == "kafka"
+Provides-Extra: gcp
+Requires-Dist: google-cloud-firestore==2.19.0; extra == "gcp"
+Requires-Dist: google-cloud-pubsub==2.27.1; extra == "gcp"
+Requires-Dist: google-cloud-storage==2.19.0; extra == "gcp"

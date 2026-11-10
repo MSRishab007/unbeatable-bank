@@ -1,0 +1,434 @@
+"""Browser test of the web app: drives a real Chromium through the gateway.
+
+    pip install playwright httpx && playwright install chromium
+    python scripts/ui_test.py                      # stack on http://localhost:8080
+    python scripts/ui_test.py --base-url http://<ip> --shots /tmp/shots
+
+It plays a customer (sign-up, account, QR payment, OTP challenge, deposits) and
+bank staff (KYC, cash deposit, fraud desk, DynaStore fault injection), on a
+desktop and a phone-sized screen, and fails on any JavaScript error.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sys
+import time
+import uuid
+from pathlib import Path
+
+import httpx
+from playwright.sync_api import Page, expect, sync_playwright
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--base-url", default=os.getenv("BASE_URL", "http://localhost:8080"))
+ap.add_argument("--shots", default="", help="folder for screenshots (optional)")
+ap.add_argument("--headed", action="store_true")
+args = ap.parse_args()
+BASE = args.base_url.rstrip("/")
+SHOTS = Path(args.shots) if args.shots else None
+if SHOTS:
+    SHOTS.mkdir(parents=True, exist_ok=True)
+
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin-dev-pass")
+RUN = int(time.time()) % 10_000_000
+PASSWORD = "ui-test-pass-1"
+passed = failed = 0
+errors: list[str] = []
+
+
+def step(name: str, fn) -> None:
+    global passed, failed
+    try:
+        fn()
+        passed += 1
+        print(f"  ok    {name}")
+    except Exception as e:  # noqa: BLE001 - report and carry on
+        failed += 1
+        print(f"  FAIL  {name}\n        {str(e).splitlines()[0][:300]}")
+
+
+def shot(page: Page, name: str) -> None:
+    if SHOTS:
+        page.screenshot(path=str(SHOTS / f"{name}.png"), full_page=True)
+
+
+def watch(page: Page, who: str) -> None:
+    page.on("pageerror", lambda e: errors.append(f"{who}: {e}"))
+    page.on("console", lambda m: errors.append(f"{who} console: {m.text}")
+            if m.type == "error" and "fonts.g" not in m.text and "Failed to load resource" not in m.text else None)
+
+
+api = httpx.Client(base_url=BASE, timeout=30)
+
+
+def make_customer_by_api(name: str, n: int) -> dict:
+    """A second, ready-to-use customer (the payee), created through the API."""
+    email = f"ui{RUN}p{n}@example.com"
+    r = api.post("/api/auth/register", json={"full_name": name, "date_of_birth": "1988-03-09",
+                                             "phone": f"+9196{RUN:07d}{n}", "email": email, "password": PASSWORD})
+    r.raise_for_status()
+    staff = api.post("/api/staff/login", json={"staff_id": "admin", "password": ADMIN_PASSWORD}).json()
+    admin = {"Authorization": f"Bearer {staff['access_token']}"}
+    api.post(f"/api/staff/kyc/{r.json()['customer_id']}/verify", headers=admin).raise_for_status()
+    login = api.post("/api/auth/login", json={"identifier": email, "password": PASSWORD,
+                                              "device_fingerprint": f"ui-test-payee-{RUN}"}).json()
+    auth = {"Authorization": f"Bearer {login['access_token']}"}
+    account = api.post("/api/accounts", json={"product_type": "SAVINGS"}, headers=auth).json()
+    return {"email": email, "auth": auth, **account}
+
+
+with sync_playwright() as pw:
+    browser = pw.chromium.launch(headless=not args.headed)
+    customer_ctx = browser.new_context(viewport={"width": 1280, "height": 900})
+    staff_ctx = browser.new_context(viewport={"width": 1280, "height": 900})
+    page = customer_ctx.new_page()
+    staff = staff_ctx.new_page()
+    watch(page, "customer")
+    watch(staff, "staff")
+    page.set_default_timeout(10_000)
+    staff.set_default_timeout(10_000)
+    expect.set_options(timeout=10_000)
+
+    email = f"ui{RUN}@example.com"
+    phone = f"98{RUN:07d}0"
+    payee = make_customer_by_api("Ravi Kumar", 1)
+    landlord = make_customer_by_api("Meera Shah", 3)
+
+    print(f"\nWeb app at {BASE}\n\n1. Sign-up and KYC")
+
+    def sign_up():
+        page.goto(BASE + "/")
+        expect(page.get_by_role("heading", name="Sign in")).to_be_visible()
+        shot(page, "01-sign-in")
+        page.get_by_role("button", name="Open an account").click()
+        page.get_by_label("Full name").fill("Asha Rao")
+        page.get_by_label("Date of birth").fill("1994-06-21")
+        page.get_by_label("Mobile number").fill(phone)
+        page.get_by_label("Email").fill(email)
+        page.get_by_label("Password").fill(PASSWORD)
+        page.get_by_role("button", name="Create my login").click()
+        expect(page.get_by_role("heading", name="Namaste, Asha")).to_be_visible()
+        expect(page.get_by_text("Your KYC is waiting for the branch")).to_be_visible()
+    step("a new customer signs up and lands on their accounts", sign_up)
+
+    def open_account():
+        page.get_by_role("button", name="Open your first account").click()
+        page.get_by_role("button", name="Open account", exact=True).click()
+        expect(page.get_by_role("heading", name="Savings account")).to_be_visible()
+        expect(page.get_by_text("Waiting for KYC")).to_be_visible()
+    step("opens a savings account; it waits for KYC", open_account)
+
+    def wrong_password():
+        other = customer_ctx.new_page()
+        other.goto(BASE + "/")
+        other.get_by_label("Email or mobile number").fill(email)
+        other.get_by_label("Password").fill("not-the-password")
+        other.get_by_role("button", name="Sign in", exact=True).last.click()
+        expect(other.get_by_role("alert")).not_to_be_empty()
+        other.close()
+    step("a wrong password shows an error and stays on the sign-in page", wrong_password)
+
+    def staff_kyc():
+        staff.goto(BASE + "/#/staff")
+        staff.get_by_label("Staff ID").fill("admin")
+        staff.get_by_label("Password").fill(ADMIN_PASSWORD)
+        staff.get_by_role("button", name="Sign in to the staff console").click()
+        staff.get_by_role("link", name="Branch desk").click()
+        staff.get_by_label("Find a customer").fill(email)
+        staff.get_by_role("button", name="Find").click()
+        card = staff.locator("[data-customer]").filter(has_text="Asha Rao")
+        card.get_by_role("button", name="Verify KYC").click()
+        expect(card.get_by_text("Verified")).to_be_visible()
+        shot(staff, "10-staff-branch")
+    step("staff find the customer by email and verify KYC", staff_kyc)
+
+    def cash():
+        card = staff.locator("[data-customer]").filter(has_text="Asha Rao")
+        card.get_by_role("button", name="Cash deposit").click()
+        staff.locator("dialog input[name=amount]").fill("50000")
+        staff.get_by_role("button", name="Deposit cash").click()
+        expect(staff.locator("dialog")).to_have_count(0)
+        card.get_by_role("button", name="Check audit trail").click()
+        expect(staff.get_by_text("Audit trail intact")).to_be_visible()
+    step("teller deposits Rs 50,000 in cash; audit trail verifies", cash)
+
+    print("\n2. Accounts and passbook")
+
+    def passbook():
+        page.reload()
+        expect(page.locator("#available")).to_have_text("₹50,000.00")
+        expect(page.locator("table.passbook tbody tr")).to_have_count(1)
+        expect(page.locator("table.passbook")).to_contain_text("Cash deposit")
+        shot(page, "02-account")
+    step("the account is active and the passbook shows the deposit", passbook)
+
+    def pay_id():
+        page.get_by_role("button", name="Set a pay ID").click()
+        page.locator("dialog input[name=alias]").fill(f"asha{RUN}")
+        page.get_by_role("button", name="Save pay ID").click()
+        expect(page.get_by_text(f"Your pay ID is asha{RUN}@unbeatable")).to_be_visible()
+    step("sets a pay ID", pay_id)
+
+    def home():
+        page.get_by_role("link", name="Accounts", exact=True).click()
+        expect(page.locator(".cover .balance").first).to_have_text("₹50,000.00")
+        shot(page, "03-home")
+    step("home shows the account with its balance", home)
+
+    print("\n3. Payments")
+
+    qr_png = Path(os.getenv("TMPDIR", "/tmp")) / f"ui-test-qr-{RUN}.png"
+
+    def make_qr():
+        # The payee's QR code, drawn by the same app in the payee's own browser session.
+        ctx = browser.new_context()
+        p2 = ctx.new_page()
+        watch(p2, "payee")
+        p2.goto(BASE + "/")
+        p2.get_by_label("Email or mobile number").fill(payee["email"])
+        p2.get_by_label("Password").fill(PASSWORD)
+        p2.get_by_role("button", name="Sign in", exact=True).last.click()
+        expect(p2.get_by_role("heading", name="Namaste, Ravi")).to_be_visible()
+        p2.goto(BASE + "/#/receive")
+        p2.get_by_label("Amount").fill("250")
+        expect(p2.locator("#pay-link")).to_have_value(re.compile(r"#/pay\?to=" + payee["account_number"] + r"&amount=250\.00"))
+        p2.locator("#qr").screenshot(path=str(qr_png))
+        shot(p2, "04-receive")
+        ctx.close()
+    step("the payee makes a QR code asking for Rs 250", make_qr)
+
+    def scan_and_pay():
+        page.get_by_role("link", name="Pay", exact=True).click()
+        page.get_by_role("button", name="Scan QR").click()
+        page.locator("#qr-file").set_input_files(str(qr_png))
+        expect(page.locator("input[name=payee]")).to_have_value(payee["account_number"])
+        expect(page.locator("#pay-form input[name=amount]")).to_have_value("250.00")
+        expect(page.get_by_text("Paying Ravi K")).to_be_visible()
+        page.get_by_role("button", name="Pay", exact=True).click()
+        expect(page.locator("#payment-result .stamp")).to_have_text("Paid")
+        expect(page.locator("#payment-result")).to_contain_text("paid by QR")
+        expect(page.locator("#payment-result .checks li.pass")).to_have_count(6)
+        shot(page, "05-paid")
+    step("scan the QR picture, check the name, pay: stamped Paid with six checks passed", scan_and_pay)
+
+    def bad_payee():
+        page.locator("input[name=payee]").fill("500100000000")
+        page.locator("#pay-form input[name=amount]").fill("10")
+        page.get_by_role("button", name="Pay", exact=True).click()
+        expect(page.locator("#pay-form .help.bad").first).not_to_be_empty()
+        expect(page.locator("#payment-history li")).to_have_count(1)
+    step("a mistyped account number is caught before any payment is made", bad_payee)
+
+    def challenge():
+        # The same customer on a laptop the bank has never seen, paying someone new.
+        ctx = browser.new_context(viewport={"width": 1280, "height": 900})
+        laptop = ctx.new_page()
+        globals()["laptop"] = laptop
+        watch(laptop, "laptop")
+        laptop.set_default_timeout(10_000)
+        laptop.goto(BASE + "/#/pay")
+        laptop.get_by_label("Email or mobile number").fill(phone)          # mobile number works as well as email
+        laptop.get_by_label("Password").fill(PASSWORD)
+        laptop.get_by_role("button", name="Sign in", exact=True).last.click()
+        expect(laptop.get_by_text("New device")).to_be_visible()
+        expect(laptop.get_by_role("heading", name="Pay", exact=True)).to_be_visible()   # back where the link pointed
+        laptop.locator("input[name=payee]").fill(landlord["account_number"])
+        laptop.locator("#pay-form input[name=amount]").fill("7000")
+        laptop.locator("input[name=note]").fill("rent")
+        laptop.get_by_role("button", name="Pay", exact=True).click()
+        expect(laptop.locator("#payment-result .stamp")).to_have_text("Confirm it's you")
+        shot(laptop, "06-challenge")
+        laptop.locator("#payment-result input[name=otp]").fill("000000")
+        laptop.get_by_role("button", name="Confirm payment").click()
+        expect(laptop.locator("#payment-result form .help.bad")).not_to_be_empty()
+    step("Rs 7,000 to a new payee from a new device asks for a code; a wrong code is refused", challenge)
+
+    def confirm():
+        page.get_by_role("link", name="Inbox").click()     # the code arrives on the customer's own, known device
+        body = page.locator("li[data-type=OTP]").first.inner_text()
+        code = re.search(r"\b(\d{6})\b", body).group(1)
+        shot(page, "07-inbox")
+        laptop.locator("#payment-result input[name=otp]").fill(code)
+        laptop.get_by_role("button", name="Confirm payment").click()
+        expect(laptop.locator("#payment-result .stamp")).to_have_text("Paid")
+        laptop.context.close()
+    step("the code from the inbox completes the payment", confirm)
+
+    def over_limit():
+        page.get_by_role("link", name="Pay", exact=True).click()
+        page.locator("input[name=payee]").fill(payee["account_number"])
+        page.locator("#pay-form input[name=amount]").fill("99000")
+        page.get_by_role("button", name="Pay", exact=True).click()
+        expect(page.locator("#payment-result .stamp")).to_have_text("Declined")
+        expect(page.locator("#payment-result .checks li.fail")).to_have_count(1)
+        expect(page.locator("#payment-result .checks li.fail")).to_contain_text("Your limits")
+        shot(page, "08-declined")
+    step("Rs 99,000 is over the limit: stamped Declined at the limits check", over_limit)
+
+    def balance_after():
+        page.get_by_role("link", name="Accounts", exact=True).click()
+        expect(page.locator(".cover .balance").first).to_have_text("₹42,750.00")
+    step("balance is Rs 42,750: exactly the two completed payments left", balance_after)
+
+    print("\n4. Deposits")
+
+    def book_fd():
+        page.get_by_role("link", name="Deposits", exact=True).click()
+        expect(page.locator("#quote")).to_contain_text("You get back")
+        page.locator("#deposit-form input[name=amount]").fill("10000")
+        expect(page.locator("#quote")).to_contain_text("₹10,000.00")
+        page.get_by_role("button", name="Book fixed deposit").click()
+        expect(page.locator("[data-deposit]")).to_have_count(1)
+        expect(page.locator("[data-deposit]")).to_contain_text("Fixed deposit of ₹10,000.00")
+    step("books a Rs 10,000 fixed deposit from a live quote", book_fd)
+
+    def book_rd():
+        page.get_by_role("button", name="Recurring deposit").click()
+        page.locator("#deposit-form input[name=amount]").fill("2000")
+        expect(page.locator("#quote")).to_contain_text("You put in")
+        page.get_by_role("button", name="Start recurring deposit").click()
+        expect(page.locator("[data-deposit]")).to_have_count(2)
+        shot(page, "09-deposits")
+    step("starts a Rs 2,000 a month recurring deposit alongside it", book_rd)
+
+    def close_fd():
+        page.locator("[data-deposit]").filter(has_text="Fixed deposit").get_by_role("button", name="Close early").click()
+        expect(page.locator("dialog")).to_contain_text("Early-closure rate")
+        page.locator("dialog button[type=submit]").click()
+        expect(page.get_by_text("Deposit closed")).to_be_visible()
+        expect(page.locator("[data-deposit]").filter(has_text="Fixed deposit")).to_contain_text("Closed")
+    step("early closure shows the reduced payout, then closes", close_fd)
+
+    print("\n5. Security")
+
+    def security():
+        page.get_by_role("link", name="Security", exact=True).click()
+        expect(page.get_by_role("heading", name="Devices that have signed in")).to_be_visible()
+        expect(page.locator("main")).to_contain_text("Chrome on")
+        expect(page.locator("main table tbody tr").first).to_be_visible()
+        shot(page, "11-security")
+    step("security page lists this device, the session and sign-in history", security)
+
+    def session_survives_reload():
+        page.reload()
+        expect(page.get_by_role("heading", name="Security")).to_be_visible()
+    step("a reload keeps the session", session_survives_reload)
+
+    print("\n6. Staff console")
+
+    def fraud_desk():
+        staff.get_by_role("link", name="Fraud desk").click()
+        expect(staff.get_by_role("heading", name="Fraud desk")).to_be_visible()
+        expect(staff.locator(".stat")).to_have_count(4)
+        shot(staff, "12-fraud-desk")
+    step("fraud desk loads with its counters", fraud_desk)
+
+    def takeover_case():
+        # A sign-in from a new device far away, then a payment: the risk engine holds it and a case opens.
+        login = api.post("/api/auth/login", headers={"X-Sim-Ip": "185.220.101.9", "X-Geo": "55.75,37.61"},
+                         json={"identifier": email, "password": PASSWORD, "device_fingerprint": f"thief-{RUN}"}).json()
+        auth = {"Authorization": f"Bearer {login['access_token']}", "X-Sim-Ip": "185.220.101.9", "Idempotency-Key": str(uuid.uuid4())}
+        accounts = api.get("/api/me/accounts", headers=auth).json()
+        src = next(a for a in accounts if a["product_type"] == "SAVINGS")
+        thief = make_customer_by_api("Mule Account", 2)
+        r = api.post("/api/payments", headers=auth, json={"from_account_id": src["account_id"],
+                                                          "payee": thief["account_number"], "amount": 900000})
+        assert r.json()["status"] in ("HELD", "DECLINED", "CHALLENGE"), r.text
+        globals()["takeover"] = r.json()
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            staff.reload()
+            expect(staff.get_by_role("heading", name="Fraud desk")).to_be_visible()
+            if staff.locator("table tbody tr").filter(has_text="9,000.00").count():
+                break
+            time.sleep(1)
+        if takeover["status"] == "HELD":
+            staff.locator("table tbody tr").filter(has_text="9,000.00").first.locator("a").click()
+            expect(staff.locator(".slip .stamp")).to_have_text("Under review")
+            shot(staff, "13-case")
+            staff.get_by_label("Note for the record").fill("Customer confirmed by phone they did not make this payment.")
+            staff.get_by_role("button", name=re.compile("^Fraud")).click()
+            expect(staff.locator("main").get_by_text("Resolved").first).to_be_visible()
+    step("a takeover-style payment becomes a case; the analyst confirms fraud", takeover_case)
+
+    def customer_sees_it():
+        page.get_by_role("link", name="Inbox").click()
+        expect(page.locator("main ul.list li").first).to_be_visible()
+        page.get_by_role("link", name="Accounts", exact=True).click()
+        if globals().get("takeover", {}).get("status") == "HELD":
+            expect(page.locator(".cover.frozen")).to_have_count(1)
+    step("the customer sees the alert, and the account is frozen after confirmed fraud", customer_sees_it)
+
+    def approvals():
+        staff.get_by_role("link", name="Approvals").click()
+        expect(staff.get_by_role("heading", name="Approvals")).to_be_visible()
+        if globals().get("takeover", {}).get("status") != "HELD":
+            return
+        staff.get_by_role("button", name="Ask to unfreeze an account").click()
+        staff.locator("dialog input[name=target_id]").fill(takeover["from_account_id"])
+        staff.locator("dialog textarea[name=reason]").fill("Customer verified in branch, password reset.")
+        staff.get_by_role("button", name="Send for approval").click()
+        row = staff.locator("[data-approval]").first
+        row.get_by_role("button", name="Approve").click()
+        expect(staff.locator(".toast.bad")).to_be_visible()      # the maker cannot also be the checker
+        shot(staff, "14-approvals")
+    step("unfreeze needs a second officer: the requester cannot approve their own request", approvals)
+
+    def system():
+        staff.get_by_role("link", name="System").click()
+        expect(staff.locator(".node")).to_have_count(3)
+        expect(staff.locator("#recon")).to_contain_text("The ledger balances")
+        shot(staff, "15-system")
+        staff.locator(".node:not(.down)").get_by_role("button", name="Cut the link").first.click()
+        expect(staff.locator(".node.down")).to_have_count(1)
+        staff.get_by_role("button", name="Clear all faults").click()
+        expect(staff.locator(".node.down")).to_have_count(0)
+    step("system page: three DynaStore nodes, ledger balances, cut a link and heal it", system)
+
+    def role_limits():
+        ctx = browser.new_context()
+        t = ctx.new_page()
+        watch(t, "teller")
+        t.goto(BASE + "/#/staff")
+        t.get_by_label("Staff ID").fill("teller1")
+        t.get_by_label("Password").fill(os.getenv("TELLER_PASSWORD", "teller-dev-pass"))
+        t.get_by_role("button", name="Sign in to the staff console").click()
+        expect(t.get_by_role("heading", name="Branch desk")).to_be_visible()
+        expect(t.get_by_role("link", name="Fraud desk")).to_have_count(0)
+        ctx.close()
+    step("a teller gets the branch desk but not the fraud desk", role_limits)
+
+    print("\n7. Phone-sized screen")
+
+    def phone_layout():
+        ctx = browser.new_context(**pw.devices["Pixel 7"])
+        m = ctx.new_page()
+        watch(m, "phone")
+        m.goto(BASE + "/")
+        shot(m, "20-phone-sign-in")
+        m.get_by_label("Email or mobile number").fill(payee["email"])
+        m.get_by_label("Password").fill(PASSWORD)
+        m.get_by_role("button", name="Sign in", exact=True).last.click()
+        expect(m.get_by_role("heading", name="Namaste, Ravi")).to_be_visible()
+        for path, name in [("accounts", "21-phone-home"), ("pay", "22-phone-pay"), ("deposits", "23-phone-deposits"),
+                           (f"accounts/{payee['account_id']}", "24-phone-passbook"), ("security", "25-phone-security")]:
+            m.goto(f"{BASE}/#/{path}")
+            expect(m.locator("main h1")).to_be_visible()
+            m.wait_for_timeout(300)
+            overflow = m.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth")
+            assert overflow <= 1, f"/{path} scrolls sideways by {overflow}px"
+            shot(m, name)
+        expect(m.locator("nav.rail a:visible")).to_have_count(5)
+        m.get_by_role("button", name="Sign out").first.click()
+        expect(m.get_by_role("heading", name="Sign in")).to_be_visible()
+        ctx.close()
+    step("every customer page fits a phone without sideways scrolling; sign-out works", phone_layout)
+
+    step("no JavaScript errors anywhere", lambda: (_ for _ in ()).throw(AssertionError("; ".join(errors[:5]))) if errors else None)
+    browser.close()
+
+print(f"\n{passed} passed, {failed} failed")
+sys.exit(1 if failed else 0)

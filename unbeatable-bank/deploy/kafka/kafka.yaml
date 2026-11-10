@@ -1,0 +1,77 @@
+# Kafka on GKE, run by the Strimzi operator (KRaft mode, no ZooKeeper).
+# One node that is both controller and broker: enough for the project, and
+# cheap. A production setup would run 3+ brokers with replication factor 3.
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaNodePool
+metadata:
+  name: combined
+  labels:
+    strimzi.io/cluster: bank-kafka
+spec:
+  replicas: 1
+  roles: [controller, broker]
+  storage:
+    type: jbod
+    volumes:
+      - id: 0
+        type: persistent-claim
+        size: 10Gi
+        deleteClaim: true
+        kraftMetadata: shared
+  resources:
+    requests:
+      cpu: 200m
+      memory: 1Gi
+    limits:
+      memory: 1536Mi
+  jvmOptions:
+    "-Xms": 512m
+    "-Xmx": 512m
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: Kafka
+metadata:
+  name: bank-kafka
+  annotations:
+    strimzi.io/node-pools: enabled
+    strimzi.io/kraft: enabled
+spec:
+  kafka:
+    version: 3.9.0
+    metadataVersion: 3.9-IV0
+    listeners:
+      # Services inside the cluster: bank-kafka-kafka-bootstrap.kafka.svc:9092
+      - name: plain
+        port: 9092
+        type: internal
+        tls: false
+      # The Flink job on Dataproc (same VPC, outside the cluster) connects to
+      # <any node internal IP>:32100. Not reachable from the internet: the
+      # firewall only allows the VPC's own ranges.
+      - name: external
+        port: 9094
+        type: nodeport
+        tls: false
+        configuration:
+          preferredNodePortAddressType: InternalIP
+          bootstrap:
+            nodePort: 32100
+          brokers:
+            - broker: 0
+              nodePort: 32101
+    config:
+      offsets.topic.replication.factor: 1
+      transaction.state.log.replication.factor: 1
+      transaction.state.log.min.isr: 1
+      default.replication.factor: 1
+      min.insync.replicas: 1
+      auto.create.topics.enable: false
+      log.retention.hours: 24
+  entityOperator:
+    topicOperator:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 192Mi
+        limits:
+          memory: 384Mi

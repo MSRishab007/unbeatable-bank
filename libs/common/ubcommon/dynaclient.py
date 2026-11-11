@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 
 import grpc
 
+from ubcommon.grpcutil import NODE_OPTIONS
 from ubproto.dynastore.v1 import dynastore_pb2 as pb
 from ubproto.dynastore.v1 import dynastore_pb2_grpc as pb_grpc
 
@@ -59,7 +60,7 @@ class DynaClient:
         targets = targets or os.environ["DYNASTORE_NODES"]
         if isinstance(targets, str):
             targets = [t.strip() for t in targets.split(",") if t.strip()]
-        self._channels = [grpc.insecure_channel(t) for t in targets]
+        self._channels = [grpc.insecure_channel(t, options=NODE_OPTIONS) for t in targets]
         self._stubs = [pb_grpc.DynaStoreStub(c) for c in self._channels]
         self._next = itertools.cycle(range(len(self._stubs)))
         self._timeout = timeout

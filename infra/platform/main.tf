@@ -69,6 +69,9 @@ resource "helm_release" "argocd" {
     notifications = { enabled = false }
     configs = {
       params = { "server.insecure" = true } # UI is reached through `make argocd` (port-forward)
+      # Track what belongs to an app by annotation, not by label: operators (Strimzi) copy
+      # labels onto objects they create, which label tracking then prunes as strays.
+      cm = { "application.resourceTrackingMethod" = "annotation" }
     }
     controller = { resources = { requests = { cpu = "100m", memory = "384Mi" } } }
     repoServer = { resources = { requests = { cpu = "50m", memory = "192Mi" } } }

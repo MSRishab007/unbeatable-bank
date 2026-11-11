@@ -11,6 +11,12 @@ spec:
     targetRevision: 0.45.*
     helm:
       valuesObject:
+        # Strimzi copies the Kafka object's labels onto everything it creates. ArgoCD's
+        # label (argocd.argoproj.io/instance: kafka) then landed on the ClusterRoleBinding
+        # the broker's init container needs; being cluster-wide it can't have the Kafka
+        # object as owner, so ArgoCD pruned it as a stray and Kafka never started
+        # ("cannot get resource nodes"). Strimzi's default exclusions plus ArgoCD's labels:
+        labelsExclusionPattern: "^app.kubernetes.io/(?!part-of).*|^kustomize.toolkit.fluxcd.io.*|^argocd.argoproj.io/.*"
         resources:
           requests:
             cpu: 100m

@@ -30,6 +30,8 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 import grpc
 from prometheus_client import Counter, Gauge, Histogram
 
+from ubcommon.grpcutil import NODE_OPTIONS
+
 from ubproto.dynastore.v1 import dynastore_pb2 as pb
 from ubproto.dynastore.v1 import dynastore_pb2_grpc as pb_grpc
 
@@ -145,7 +147,7 @@ class Node:
 
     def _channel(self, peer: str) -> grpc.Channel:
         if peer not in self._channels:
-            self._channels[peer] = grpc.insecure_channel(self.peers[peer])
+            self._channels[peer] = grpc.insecure_channel(self.peers[peer], options=NODE_OPTIONS)
         return self._channels[peer]
 
     def _replica(self, peer: str, method: str, request, timeout: float | None = None):

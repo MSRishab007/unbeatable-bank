@@ -302,3 +302,27 @@ def test_a_node_that_cannot_listen_fails_loudly(tmp_path):
         with pytest.raises(RuntimeError, match="could not listen|Failed to bind"):
             server.start(node, port, host="127.0.0.1")
         node.stop()
+
+
+def test_clients_reach_a_restarted_node_straight_away(cluster):
+    """gRPC shares one connection per address across a process by default. A failed call
+    to a stopped node then made every client fail on that address, even ones created after
+    the node was back (seen on GitHub's runners). Each client now has its own connection,
+    and a lost one is retried within 2 seconds instead of up to 2 minutes."""
+    key = key_owned_by(cluster, "node-0")
+    old = cluster.client("node-0")
+    old.incr(key, 4, w=3)
+    cluster.stop("node-0")
+    with pytest.raises(DynaUnavailable):
+        old.incr(key, 1)                                   # fails, and gRPC starts backing off
+    cluster.start("node-0")
+    cluster.client("node-0").incr(key, 1, w=2)             # a new client works at once
+    assert wait_for(lambda: _works(old, key), timeout=4)   # the old one is back within seconds
+
+
+def _works(client, key):
+    try:
+        client.counter(key, r=1)
+        return True
+    except DynaUnavailable:
+        return False

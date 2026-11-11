@@ -30,10 +30,33 @@ def load_app(service: str, alias: str):
     return module
 
 
+_handed_out: set[int] = set()
+
+
 def free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+    """A port for a test server, chosen BELOW the range Linux uses for outgoing connections.
+
+    Asking the OS for "any free port" returns one from the ephemeral range (32768-60999),
+    the same range outgoing connections get their source ports from. Test nodes start
+    talking to each other at once, so one of those connections could take a port picked
+    for a node that hasn't started yet, and that node could not listen on it (seen on
+    GitHub's runners as "connection refused"). Ports below 32768 are never handed to
+    outgoing connections.
+    """
+    import random
+
+    for _ in range(500):
+        port = random.randint(20000, 32000)
+        if port in _handed_out:
+            continue
+        try:
+            with socket.socket() as s:                          # the test clients use 127.0.0.1
+                s.bind(("0.0.0.0", port))
+        except OSError:
+            continue
+        _handed_out.add(port)
+        return port
+    raise RuntimeError("no free port between 20000 and 32000")
 
 
 class LocalDynaCluster:
@@ -52,7 +75,8 @@ class LocalDynaCluster:
         for node_id, address in self.peers.items():
             node = Node(node_id, self.peers, str(Path(tmp_path) / node_id / "dynastore.db"), **kwargs)
             self.nodes[node_id] = node
-            self.servers[node_id] = server.start(node, int(address.split(":")[1]))
+            self.servers[node_id] = server.start(node, int(address.split(":")[1]), host="127.0.0.1")
+        for node in self.nodes.values():        # every node listens before any starts calling the others
             node.start_background()
 
     @property

@@ -12,10 +12,7 @@ from app import server
 from app.node import Node
 
 
-def free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+from ubcommon.testing import free_port  # noqa: E402  (ports below the outgoing-connection range)
 
 
 class Cluster:
@@ -30,16 +27,19 @@ class Cluster:
         self.servers = {}
         self.black_holes = []
         for node_id in self.ids:
-            self.start(node_id)
+            self.start(node_id, background=False)
+        for node in self.nodes.values():        # every node listens before any starts calling the others
+            node.start_background()
 
     def path(self, node_id):
         return str(self.tmp_path / node_id / "dynastore.db")
 
-    def start(self, node_id):
+    def start(self, node_id, background=True):
         node = Node(node_id, self.peers, self.path(node_id), **self.kwargs)
         self.nodes[node_id] = node
-        self.servers[node_id] = server.start(node, int(self.peers[node_id].split(":")[1]))
-        node.start_background()
+        self.servers[node_id] = server.start(node, int(self.peers[node_id].split(":")[1]), host="127.0.0.1")
+        if background:
+            node.start_background()
         return node
 
     def stop(self, node_id):

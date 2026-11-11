@@ -158,11 +158,16 @@ class AdminApi(pb_grpc.AdminServicer):
         return pb.SetFaultsResponse(ok=True)
 
 
-def start(node: Node, port: int) -> grpc.Server:
+def start(node: Node, port: int, host: str = "[::]") -> grpc.Server:
+    """Serve on host:port. In a pod "[::]" (every interface). Tests pass "127.0.0.1": with
+    "[::]" on a machine with IPv6, gRPC may end up listening on IPv6 only if the IPv4 port
+    is briefly taken, and clients on 127.0.0.1 then get "connection refused"."""
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=48, thread_name_prefix=f"{node.id}-grpc"))
     pb_grpc.add_DynaStoreServicer_to_server(ClientApi(node), server)
     pb_grpc.add_ReplicaServicer_to_server(ReplicaApi(node), server)
     pb_grpc.add_AdminServicer_to_server(AdminApi(node), server)
-    server.bound_port = server.add_insecure_port(f"[::]:{port}")
+    server.bound_port = server.add_insecure_port(f"{host}:{port}")
+    if port and server.bound_port != port:
+        raise RuntimeError(f"{node.id} could not listen on {host}:{port}")
     server.start()
     return server

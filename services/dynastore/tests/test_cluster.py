@@ -283,3 +283,22 @@ def test_cluster_status(cluster):
     assert status.node_id == "node-1" and len(status.nodes) == 5
     assert (status.n, status.r, status.w) == (3, 2, 2)
     assert all(n.alive for n in status.nodes)
+
+
+def test_a_node_that_cannot_listen_fails_loudly(tmp_path):
+    """If its port is taken, starting a node must raise. (Some gRPC releases return 0
+    instead of raising, which once left a test node running but deaf.)"""
+    import socket
+
+    from app import server
+    from app.node import Node
+    from ubcommon.testing import free_port
+
+    port = free_port()
+    with socket.socket() as squatter:
+        squatter.bind(("0.0.0.0", port))
+        squatter.listen(1)
+        node = Node("node-x", {"node-x": f"127.0.0.1:{port}"}, str(tmp_path / "x.db"))
+        with pytest.raises(RuntimeError, match="could not listen|Failed to bind"):
+            server.start(node, port, host="127.0.0.1")
+        node.stop()

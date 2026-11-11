@@ -212,6 +212,16 @@ def test_customer_reports_a_payment(conn, deps):
         service.report_fraud(conn, deps, uuid.uuid4(), txn, "not my payment at all")   # someone else's
 
 
+def test_block_everything_opens_one_high_case(conn, deps):
+    customer, accounts = uuid.uuid4(), [uuid.uuid4(), uuid.uuid4()]
+    case = service.customer_lockdown(conn, deps, customer, accounts)
+    assert (case["type"], case["severity"], case["account_id"]) == ("ACCOUNT_TAKEOVER", "HIGH", accounts[0])
+    assert "2 account(s) frozen" in case["summary"]
+    assert service.customer_lockdown(conn, deps, customer, accounts)["case_id"] == case["case_id"]   # once
+    alert = deps.docstore.query("alerts", {"case_id": str(case["case_id"])})
+    assert alert and alert[0]["type"] == "CUSTOMER_LOCKDOWN"
+
+
 def test_notifications_belong_to_their_customer(conn, deps):
     e, _ = held_payment(conn, deps)
     note = inbox(deps, e["customer_id"])[0]

@@ -54,6 +54,14 @@ class FakeAccounts:
         self.customers[profile["customer_id"]] = profile
         return {**profile, "cif_number": f"CIF{len(self.customers):09d}"}
 
+    def get_customer(self, customer_id):
+        return self.customers[str(customer_id)]
+
+    def update_contact(self, customer_id, field, value, actor):
+        if self.fail:
+            raise self.fail
+        self.customers[str(customer_id)][field] = value
+
     def verify_kyc(self, customer_id, actor="system:identity"):
         if self.fail:
             raise self.fail

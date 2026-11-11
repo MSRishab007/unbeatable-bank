@@ -113,6 +113,10 @@ class ReportIn(BaseModel):
     description: str = Field(..., min_length=5, max_length=1000)
 
 
+class LockdownIn(BaseModel):
+    account_ids: list[UUID] = Field(default_factory=list, max_length=50)
+
+
 class ResolveIn(BaseModel):
     resolution: Literal["CONFIRMED_FRAUD", "FALSE_POSITIVE"]
     note: str = Field(..., min_length=3, max_length=2000)
@@ -158,6 +162,12 @@ def read_notification(notification_id: str, customer_id: UUID = Depends(get_cust
 def report(body: ReportIn, customer_id: UUID = Depends(get_customer), conn=Depends(get_conn),
            deps=Depends(get_deps)):
     return service.report_fraud(conn, deps, customer_id, body.txn_id, body.description)
+
+
+@app.post("/v1/lockdown", status_code=201)
+def lockdown(body: LockdownIn, customer_id: UUID = Depends(get_customer), conn=Depends(get_conn),
+             deps=Depends(get_deps)):
+    return service.customer_lockdown(conn, deps, customer_id, body.account_ids)
 
 
 @app.get("/v1/reports")

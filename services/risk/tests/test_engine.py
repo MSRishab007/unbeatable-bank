@@ -177,6 +177,26 @@ def test_stolen_login_from_abroad_is_blocked(engine, hour):
     assert (result.decision, result.score) == ("BLOCK", 100)
 
 
+def test_changed_contact_details_are_weighed_not_blocked(engine):
+    """After an email/phone change, paying known or trusted payees is untouched; paying a new
+    payee asks for a code. It is a risk signal, never a block on its own."""
+    c = Customer(engine)
+    engine.raise_signal(f"sig:cust:{c.id}:contact_changed", ttl=3 * 86400)
+    assert c.pay(10_000, trusted=True).decision == "ALLOW"
+    new_payee = c.pay(10_000, payee=uuid.uuid4().hex)
+    assert new_payee.decision == "CHALLENGE" and {"CONTACT_CHANGED", "NEW_PAYEE"} <= set(new_payee.reasons)
+
+
+def test_credential_reset_and_pin_lock_add_weight(engine):
+    c = Customer(engine)
+    engine.raise_signal(f"sig:cust:{c.id}:credential_reset", ttl=86400)
+    assert "CREDENTIAL_RESET" not in c.pay(2_000, trusted=True).reasons
+    assert "CREDENTIAL_RESET" in c.pay(2_000, payee=uuid.uuid4().hex).reasons
+    engine.raise_signal(f"sig:cust:{c.id}:pin_locked", ttl=86400)
+    locked = c.pay(2_000, trusted=True)
+    assert locked.reasons == ["PIN_LOCKED"] and locked.decision == "ALLOW"   # 15: noted, not enough alone
+
+
 def test_deny_list_blocks(engine):
     c = Customer(engine)
     engine.store.put(f"deny:acct:{c.payee}", "confirmed fraud")

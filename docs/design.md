@@ -323,7 +323,21 @@ cannot run anything in the bank's origin.
 ## 10. Security
 
 - Passwords are stored as salted scrypt hashes, OTPs as hashes, PAN only as a keyed hash.
-- Short-lived JWTs; new devices are detected and scored; OTP step-up for risky payments.
+- Short-lived JWTs, but every signed-in request is also checked against its session
+  (Identity, via the gateway; ACTIVE answers cached 5 s), so logout, "remove device",
+  a password change or "Block everything" take effect at once. Refresh tokens rotate;
+  a reused one ends the session. Customer sessions lock after 5 minutes idle and unlock
+  with the app PIN; staff sessions end after 15 minutes idle.
+- Two PINs, checked by the gateway with Identity before the request reaches the service
+  doing the work: a 6-digit payment PIN (payments, new payees, higher limits, joint
+  holders) and a 4-digit app PIN (deposits, nominees, unlocking). Three wrong tries lock
+  a PIN for 24 hours. PINs are HMAC-SHA256 with a salt and a server-side pepper.
+- A login from a device the customer hasn't confirmed needs a code sent to their email
+  and to the app on their other devices: a stolen password alone opens nothing.
+- Account-security events (PIN locked, password or PIN reset, email/phone changed, a
+  replayed refresh token) become short-lived DynaStore signals that the risk engine
+  weighs; a changed contact never blocks payments by itself. Raising a limit takes
+  24 hours; lowering it is immediate. OTP step-up for risky payments.
 - Role-based staff access (ADMIN, ANALYST, TELLER, KYC); unfreezing an account needs
   a second member of staff (maker-checker).
 - Account history is an append-only hash chain; tampering is detectable.

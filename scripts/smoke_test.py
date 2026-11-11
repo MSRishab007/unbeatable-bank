@@ -31,6 +31,7 @@ RUN_IP = f"10.{uuid.uuid4().int % 250 + 1}.{uuid.uuid4().int % 250 + 1}.{uuid.uu
 G = httpx.Client(base_url=BASE, timeout=30, headers={"X-Sim-Ip": RUN_IP})
 RS = 100
 PASSWORD = "correct-horse-battery-1"
+PAY_PIN, APP_PIN = "583921", "4826"          # every test customer sets these two
 failures = 0
 
 
@@ -58,10 +59,32 @@ def staff(staff_id: str, password: str) -> dict:
 
 
 def login(email: str, device: str) -> dict:
+    """First login on a device. A device the bank hasn't seen before answers 202 instead:
+    see login_new_device."""
     r = G.post("/api/auth/login", json={"identifier": email, "password": PASSWORD,
                                         "device_fingerprint": device, "device_label": device})
     r.raise_for_status()
     return r.json()
+
+
+def latest_code(headers: dict, after: float = 0) -> str | None:
+    """The newest 6-digit code in the customer's inbox (read from a device already signed in)."""
+    def find():
+        notes = [n for n in G.get("/api/notifications", headers=headers).json()
+                 if n.get("type") == "OTP" and n.get("created_at", 0) >= after]
+        notes.sort(key=lambda n: n.get("created_at", 0))
+        m = notes and re.search(r"\b(\d{6})\b", notes[-1]["body"])
+        return m and m.group(1)
+    return wait_for(find, 5)
+
+
+def bearer(tokens: dict) -> dict:
+    return {"Authorization": f"Bearer {tokens['access_token']}"}
+
+
+def set_pins(headers: dict) -> None:
+    for kind, pin in (("payment", PAY_PIN), ("app", APP_PIN)):
+        G.put(f"/api/auth/pins/{kind}", headers=headers, json={"pin": pin, "password": PASSWORD}).raise_for_status()
 
 
 def new_customer(name: str, admin: dict, balance: int = 0) -> dict:
@@ -73,18 +96,20 @@ def new_customer(name: str, admin: dict, balance: int = 0) -> dict:
     r.raise_for_status()
     customer_id = r.json()["customer_id"]
     G.post(f"/api/staff/kyc/{customer_id}/verify", headers=admin).raise_for_status()
-    headers = {"Authorization": f"Bearer {login(email, f'{name}-phone')['access_token']}"}
+    tokens = login(email, f"{name}-phone")
+    headers = bearer(tokens)
+    set_pins(headers)
     account = G.post("/api/accounts", headers=headers, json={"product_type": "SAVINGS"}).json()
     if balance:
         G.post("/api/staff/cash-deposits", headers={**admin, "Idempotency-Key": str(uuid.uuid4())},
                json={"account_number": account["account_number"], "amount": balance}).raise_for_status()
     return {"id": customer_id, "email": email, "H": headers, "account_id": account["account_id"],
-            "number": account["account_number"]}
+            "number": account["account_number"], "refresh": tokens["refresh_token"]}
 
 
 def pay(headers: dict, from_account: str, payee: str, amount: int, key: str | None = None,
-        channel: str = "TRANSFER") -> httpx.Response:
-    return G.post("/api/payments", headers={**headers, "Idempotency-Key": key or str(uuid.uuid4())},
+        channel: str = "TRANSFER", pin: str = PAY_PIN) -> httpx.Response:
+    return G.post("/api/payments", headers={**headers, "Idempotency-Key": key or str(uuid.uuid4()), "X-Pin": pin},
                   json={"from_account_id": from_account, "payee": payee, "amount": amount, "channel": channel})
 
 
@@ -129,7 +154,7 @@ run = uuid.uuid4().int % 10**9
 kyc_email = f"kyc.{run}@example.com"
 reg = G.post("/api/auth/register", json={"full_name": "Kiran Rao", "date_of_birth": "1995-02-11",
                                          "phone": f"+918{run:09d}", "email": kyc_email, "password": PASSWORD}).json()
-kiran = {"Authorization": f"Bearer {login(kyc_email, 'kiran-phone')['access_token']}"}
+kiran = bearer(login(kyc_email, "kiran-phone"))
 kiran_account = G.post("/api/accounts", headers=kiran, json={"product_type": "SAVINGS"}).json()
 check("account opened before KYC waits as PENDING_KYC", kiran_account.get("status") == "PENDING_KYC", kiran_account)
 bad = G.post("/api/kyc/documents", params={"doc_type": "PAN"}, headers={**kiran, "Content-Type": "image/png"},
@@ -161,6 +186,46 @@ check("the waiting account is now ACTIVE", G.get(f"/api/accounts/{kiran_account[
 trail = [e["event_type"] for e in G.get(f"/api/staff/customers/{reg['customer_id']}/kyc-events", headers=ADMIN).json()]
 check(f"audit trail: {', '.join(trail)}",
       trail == ["UPLOADED", "UPLOADED", "VIEWED", "REJECTED", "UPLOADED", "APPROVED", "APPROVED", "KYC_VERIFIED"], trail)
+
+# ---------------------------------------------------------------------------------------------
+print("1c. PINs and sessions (Gateway checks every request with Identity)")
+r = pay(riya["H"], riya["account_id"], arjun["number"], 100 * RS, pin="")
+check("a payment without the payment PIN is refused (428 PIN_REQUIRED)",
+      r.status_code == 428 and r.json().get("error") == "PIN_REQUIRED", r.text)
+r = pay(riya["H"], riya["account_id"], arjun["number"], 100 * RS, pin=APP_PIN + "00")
+check("a wrong payment PIN: 403 with tries left, nothing paid",
+      r.status_code == 403 and r.json().get("details", {}).get("attempts_left") == 2, r.text)
+r = G.put("/api/auth/pins/app", headers=riya["H"], json={"pin": PAY_PIN[:4], "current_pin": APP_PIN})
+check("the app PIN can't be the start of the payment PIN", r.status_code == 400, r.text)
+r = G.post("/api/deposits/fd", headers={**riya["H"], "Idempotency-Key": str(uuid.uuid4()), "X-Pin": PAY_PIN},
+           json={"funding_account_id": riya["account_id"], "amount": 1_000 * RS, "tenure_months": 12})
+check("a deposit needs the app PIN, not the payment PIN", r.status_code == 403 and
+      r.json().get("details", {}).get("kind") == "APP", r.text)
+G.post("/api/auth/lock", headers=riya["H"])
+locked = G.get("/api/me", headers=riya["H"])
+check("a locked session is refused (423 SESSION_LOCKED)", locked.status_code == 423 and
+      locked.json().get("error") == "SESSION_LOCKED", locked.text)
+wrong = G.post("/api/auth/unlock", headers=riya["H"], json={"pin": "9182"})
+right = G.post("/api/auth/unlock", headers=riya["H"], json={"pin": APP_PIN})
+check("unlocked with the app PIN (a wrong one is refused)", wrong.status_code == 403 and right.status_code == 200
+      and G.get("/api/me", headers=riya["H"]).status_code == 200, wrong.text + right.text)
+tokens = G.post("/api/auth/refresh", json={"refresh_token": riya["refresh"]}).json()
+check("refresh gives a new refresh token", tokens.get("refresh_token") not in (None, riya["refresh"]), tokens)
+riya["H"], riya["refresh"] = bearer(tokens), tokens.get("refresh_token")
+# A separate customer for the destructive checks: a replayed token raises a risk signal
+# that would colour Riya's payments in the sections below.
+sam = new_customer("Sam Iyer", ADMIN)
+spare = login(sam["email"], "Sam Iyer-phone")
+replay = G.post("/api/auth/refresh", json={"refresh_token": spare["refresh_token"]}).json()
+reused = G.post("/api/auth/refresh", json={"refresh_token": spare["refresh_token"]})
+check("an old refresh token used again ends that session for everyone holding it",
+      reused.status_code == 401 and wait_for(lambda: G.get("/api/me", headers=bearer(replay)).status_code == 401, 8),
+      reused.text)
+other = login(sam["email"], "Sam Iyer-phone")
+G.post("/api/auth/logout", headers=bearer(other))
+check("logging out stops the access token at once (not 15 minutes later)",
+      wait_for(lambda: G.get("/api/me", headers=bearer(other)).status_code == 401, 8))
+check("other sessions are untouched", G.get("/api/me", headers=sam["H"]).status_code == 200)
 
 # ---------------------------------------------------------------------------------------------
 print("2. Payments (Gateway -> Intake -REST-> Account, -gRPC-> Rate limit, Risk, Ledger)")
@@ -196,9 +261,17 @@ check("customer is told why", bool(limited.get("decline_message")), limited)
 
 # ---------------------------------------------------------------------------------------------
 print("4. Risk: new device -> OTP challenge (Risk Detection, Identity, Notification)")
-second = login(riya["email"], "unknown-laptop")
-H2 = {"Authorization": f"Bearer {second['access_token']}"}
-check("login from a second device is flagged as new", second.get("new_device") is True, second.get("new_device"))
+asked = time.time() - 1
+challenge = G.post("/api/auth/login", json={"identifier": riya["email"], "password": PASSWORD,
+                                            "device_fingerprint": "unknown-laptop", "device_label": "unknown-laptop"})
+check("password alone is not enough on a new device (202, code sent)",
+      challenge.status_code == 202 and "access_token" not in challenge.json(), challenge.text)
+device_code = latest_code(riya["H"], after=asked)
+check("the code reached the inbox of Riya's other device", bool(device_code))
+second = G.post("/api/auth/login/verify", json={"challenge_id": challenge.json().get("challenge_id"),
+                                                "code": device_code or ""}).json()
+H2 = bearer(second) if "access_token" in second else {}
+check("with the code, the new device signs in, flagged as new", second.get("new_device") is True, second)
 r = pay(H2, riya["account_id"], arjun["number"], 7_000 * RS)
 txn = r.json()
 check(f"Rs 7,000 from the new device: CHALLENGE (score {txn.get('risk_score')}, {txn.get('risk_reasons')})",
@@ -289,12 +362,16 @@ check(f"FD quote: Rs 1,00,000 for 3 months -> Rs {quote.get('maturity_amount', 0
       quote.get("maturity_amount", 0) > 100_000 * RS, quote)
 fd_key = str(uuid.uuid4())
 body = {"funding_account_id": dave["account_id"], "amount": 100_000 * RS, "tenure_months": 3}
-fd = G.post("/api/deposits/fd", headers={**dave["H"], "Idempotency-Key": fd_key}, json=body)
-fd_again = G.post("/api/deposits/fd", headers={**dave["H"], "Idempotency-Key": fd_key}, json=body)
+DAVE_APP = {**dave["H"], "X-Pin": APP_PIN}
+fd = G.post("/api/deposits/fd", headers={**DAVE_APP, "Idempotency-Key": fd_key}, json=body)
+fd_again = G.post("/api/deposits/fd", headers={**DAVE_APP, "Idempotency-Key": fd_key}, json=body)
 check("FD booked; retry with the same key books it once",
       fd.status_code in (200, 201) and fd_again.json().get("deposit_id") == fd.json().get("deposit_id")
       and balance(dave) == 100_000 * RS, fd.text)
-rd = G.post("/api/deposits/rd", headers={**dave["H"], "Idempotency-Key": str(uuid.uuid4())},
+nominee = G.post(f"/api/accounts/{fd.json().get('deposit_id')}/nominees", headers=DAVE_APP,
+                 json={"full_name": "Meera Kapoor", "relation": "SPOUSE", "share_pct": 100})
+check("a nominee named for the FD (app PIN)", nominee.status_code == 201, nominee.text)
+rd = G.post("/api/deposits/rd", headers={**DAVE_APP, "Idempotency-Key": str(uuid.uuid4())},
             json={"funding_account_id": dave["account_id"], "amount": 2_000 * RS, "tenure_months": 6})
 check("RD opened with the first installment paid", rd.status_code in (200, 201), rd.text)
 if not SKIP_EOD:
@@ -345,6 +422,39 @@ if periods:
 else:
     print("  note  no completed month yet for this account (the bank date is still in its opening month);")
     print("        run without --skip-eod, which moves the calendar forward, to test monthly statements")
+
+# ---------------------------------------------------------------------------------------------
+print("8c. Payees, limits, contact details, Block everything")
+erin = new_customer("Erin Thomas", ADMIN, balance=20_000 * RS)
+EPAY = {**erin["H"], "X-Pin": PAY_PIN}
+saved = G.post("/api/me/beneficiaries", headers=EPAY, json={"payee_account_number": arjun["number"], "nickname": "Arjun"})
+check("payee saved with the payment PIN, in its 24-hour cooling period",
+      saved.status_code == 201 and G.get("/api/me/beneficiaries", headers=erin["H"]).json()[0].get("in_cooling_period"),
+      saved.text)
+check("payee removed", G.delete(f"/api/me/beneficiaries/{saved.json().get('beneficiary_id')}", headers=erin["H"]).status_code == 204)
+acct = G.get(f"/api/accounts/{erin['account_id']}", headers=erin["H"]).json()
+raised = G.patch(f"/api/accounts/{erin['account_id']}/limits", headers=EPAY,
+                 json={"daily_limit": acct["daily_limit"] * 2, "per_txn_limit": acct["per_txn_limit"] // 2}).json()
+check("a raised limit waits 24 hours; a lowered one applies at once",
+      raised.get("daily_limit") == acct["daily_limit"] and raised.get("pending_daily_limit") == acct["daily_limit"] * 2
+      and raised.get("per_txn_limit") == acct["per_txn_limit"] // 2, raised)
+asked = time.time() - 1
+new_email = f"erin.new.{uuid.uuid4().int % 10**9}@example.com"
+started = G.post("/api/auth/contact", headers=erin["H"], json={"field": "email", "value": new_email, "password": PASSWORD})
+code = latest_code(erin["H"], after=asked)
+confirmed = G.post("/api/auth/contact/confirm", headers=erin["H"], json={"code": code or ""})
+check("email changed with a code sent to the old one", started.status_code == 202 and confirmed.status_code == 200
+      and G.get("/api/me", headers=erin["H"]).json().get("email") == new_email, started.text + confirmed.text)
+r = pay(erin["H"], erin["account_id"], arjun["number"], 6_000 * RS)
+check(f"paying a new payee right after: weighed, not blocked ({r.json().get('status')}, {r.json().get('risk_reasons')})",
+      r.json().get("status") in ("COMPLETED", "CHALLENGE", "HELD") and "CONTACT_CHANGED" in (r.json().get("risk_reasons") or []),
+      r.text)
+blocked = G.post("/api/me/lockdown", headers=erin["H"])
+check("Block everything: accounts frozen, case opened", blocked.status_code == 200 and
+      blocked.json().get("accounts_frozen") and blocked.json().get("case_number"), blocked.text)
+check("... and every session ended", wait_for(lambda: G.get("/api/me", headers=erin["H"]).status_code == 401, 8))
+check("the frozen account shows to the bank", G.get(f"/api/staff/accounts/{erin['account_id']}", headers=ADMIN)
+      .json().get("status") == "FROZEN")
 
 # ---------------------------------------------------------------------------------------------
 print("9. Books and operations")

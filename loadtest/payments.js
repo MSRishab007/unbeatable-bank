@@ -32,6 +32,7 @@ const BROWSE_RPS = parseInt(__ENV.BROWSE_RPS || "120");
 const DURATION = __ENV.DURATION || "6m";
 const RAMP = __ENV.RAMP || "2m";
 const PASSWORD = "loadtest-pass-1";
+const PAY_PIN = "583921";
 
 const completed = new Counter("payments_completed");
 const declined = new Counter("payments_declined");
@@ -115,6 +116,7 @@ export function setup() {
       identifier: email, password: PASSWORD, device_fingerprint: `load-device-${run}-${i}`,
     }), json(net));
     const auth = Object.assign({ Authorization: `Bearer ${login.json("access_token")}` }, net);
+    http.put(`${BASE}/api/auth/pins/payment`, JSON.stringify({ pin: PAY_PIN, password: PASSWORD }), json(auth));
     const account = http.post(`${BASE}/api/accounts`, JSON.stringify({ product_type: "SAVINGS" }), json(auth));
     http.post(`${BASE}/api/staff/cash-deposits`,
       JSON.stringify({ account_number: account.json("account_number"), amount: 50000000 }),
@@ -126,7 +128,8 @@ export function setup() {
   return { customers, started: Date.now() };
 }
 
-// Access tokens last 15 minutes; log in again when a run is longer than that.
+// Access tokens last 15 minutes; log in again when a run is longer than that, or when a
+// session ended or locked (a customer idle for 5 minutes gets a 423).
 const sessions = {};
 function auth(data, index) {
   const c = data.customers[index];
@@ -135,7 +138,7 @@ function auth(data, index) {
   if (!s && Date.now() - data.started < 12 * 60 * 1000) {
     s = sessions[index] = { token: c.token, at: data.started };
   }
-  if (!s || Date.now() - s.at > 12 * 60 * 1000) {
+  if (!s || s.stale || Date.now() - s.at > 12 * 60 * 1000) {
     const login = http.post(`${BASE}/api/auth/login`, JSON.stringify({
       identifier: c.email, password: PASSWORD, device_fingerprint: c.device }), json(net));
     s = sessions[index] = { token: login.json("access_token"), at: Date.now() };
@@ -150,7 +153,9 @@ export function pay(data) {
   const to = data.customers[(i + 1 + Math.floor(Math.random() * (data.customers.length - 1))) % data.customers.length];
   const res = http.post(`${BASE}/api/payments`, JSON.stringify({
     from_account_id: from.account_id, payee: to.number, amount: 1000 + Math.floor(Math.random() * 40000),
-  }), Object.assign(json(Object.assign({ "Idempotency-Key": uuid() }, auth(data, i))), { tags: { name: "POST /api/payments" } }));
+  }), Object.assign(json(Object.assign({ "Idempotency-Key": uuid(), "X-Pin": PAY_PIN }, auth(data, i))),
+    { tags: { name: "POST /api/payments" } }));
+  if (res.status === 401 || res.status === 423) sessions[i].stale = true;
   check(res, { "payment answered": (r) => [200, 201, 202, 422].includes(r.status) });
   if (res.status === 201) completed.add(1);
   else if (res.status === 202) waiting.add(1);
@@ -171,5 +176,6 @@ export function browse(data) {
     res = http.get(`${BASE}/api/accounts/${c.account_id}/transactions`,
       Object.assign({ tags: { name: "GET /api/accounts/:id/transactions" } }, headers));
   }
+  if (res.status === 401 || res.status === 423) sessions[i].stale = true;
   check(res, { "read ok": (r) => r.status === 200 });
 }

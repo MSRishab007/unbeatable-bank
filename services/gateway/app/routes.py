@@ -5,6 +5,10 @@
              staff     bank staff; `roles` narrows it further (ADMIN may do everything)
     owner    "account": the customer must be a holder of the {account_id} in the path
     limit    (requests, seconds) allowed per client address: a brake for endpoints that need no login
+    pin      "PAYMENT" or "APP": the request must carry that PIN in the X-Pin header. The gateway
+             checks it with Identity and does not pass it on.
+             PAYMENT (6 digits): money leaving, new payees, higher limits, new joint holders
+             APP (4 digits):     deposits and nominees
 
 In upstream paths, {sub} is the caller's id from the token, and other {names}
 come from the public path.
@@ -26,6 +30,7 @@ class Route:
     roles: tuple[str, ...] = ()
     owner: str | None = None
     limit: tuple[int, int] | None = None   # (requests, seconds) per client address, for public endpoints
+    pin: str | None = None                 # "PAYMENT" | "APP"
 
     def regex(self) -> re.Pattern:
         pattern = re.sub(r"\{(\w+):path\}", r"(?P<\1>.+)", self.path)
@@ -34,34 +39,62 @@ class Route:
 
 
 C, S, P = "customer", "staff", "public"
+PAY, APP = "PAYMENT", "APP"
+
+# Allowed while the session is locked (idle or locked by the customer).
+WHILE_LOCKED = {"/api/auth/unlock", "/api/auth/logout", "/api/auth/lock", "/api/me/lockdown", "/api/staff/logout"}
 
 ROUTES: list[Route] = [
     # ---- sign-up and login
     Route("POST", "/api/auth/register", "identity", "/v1/auth/register", P),
     Route("POST", "/api/auth/login", "identity", "/v1/auth/login", P),
+    Route("POST", "/api/auth/login/verify", "identity", "/v1/auth/login/verify", P, limit=(10, 60)),
     Route("POST", "/api/auth/refresh", "identity", "/v1/auth/refresh", P),
     Route("POST", "/api/auth/logout", "identity", "/v1/auth/logout"),
+    Route("POST", "/api/auth/lock", "identity", "/v1/auth/lock"),
+    Route("POST", "/api/auth/unlock", "identity", "/v1/auth/unlock"),
     Route("GET", "/api/auth/devices", "identity", "/v1/auth/devices"),
     Route("DELETE", "/api/auth/devices/{device_id}", "identity", "/v1/auth/devices/{device_id}"),
     Route("GET", "/api/auth/sessions", "identity", "/v1/auth/sessions"),
+    Route("DELETE", "/api/auth/sessions/{session_id}", "identity", "/v1/auth/sessions/{session_id}"),
     Route("GET", "/api/auth/login-history", "identity", "/v1/auth/login-history"),
     Route("POST", "/api/staff/login", "identity", "/v1/staff/login", P),
+    Route("POST", "/api/staff/logout", "identity", "/v1/staff/logout", S),
+
+    # ---- PINs, password, contact details
+    Route("GET", "/api/auth/pins", "identity", "/v1/auth/pins"),
+    Route("PUT", "/api/auth/pins/{kind}", "identity", "/v1/auth/pins/{kind}"),
+    Route("POST", "/api/auth/pins/{kind}/reset-code", "identity", "/v1/auth/pins/{kind}/reset-code"),
+    Route("POST", "/api/auth/pins/{kind}/reset", "identity", "/v1/auth/pins/{kind}/reset"),
+    Route("POST", "/api/auth/password", "identity", "/v1/auth/password"),
+    Route("POST", "/api/auth/password/forgot", "identity", "/v1/auth/password/forgot", P, limit=(5, 300)),
+    Route("POST", "/api/auth/password/reset", "identity", "/v1/auth/password/reset", P, limit=(10, 300)),
+    Route("POST", "/api/auth/contact", "identity", "/v1/auth/contact"),
+    Route("POST", "/api/auth/contact/confirm", "identity", "/v1/auth/contact/confirm"),
 
     # ---- profile, accounts, payees
     Route("GET", "/api/me", "account", "/v1/customers/{sub}"),
     Route("GET", "/api/me/beneficiaries", "account", "/v1/customers/{sub}/beneficiaries"),
-    Route("POST", "/api/me/beneficiaries", "account", "/v1/customers/{sub}/beneficiaries"),
+    Route("POST", "/api/me/beneficiaries", "account", "/v1/customers/{sub}/beneficiaries", pin=PAY),
+    Route("DELETE", "/api/me/beneficiaries/{beneficiary_id}", "account",
+          "/v1/customers/{sub}/beneficiaries/{beneficiary_id}"),
     Route("GET", "/api/accounts/{account_id}", "account", "/v1/accounts/{account_id}", owner="account"),
     Route("GET", "/api/accounts/{account_id}/events", "account", "/v1/accounts/{account_id}/events",
           owner="account"),
     Route("POST", "/api/accounts/{account_id}/freeze", "account", "/v1/accounts/{account_id}/freeze",
           owner="account"),
     Route("PATCH", "/api/accounts/{account_id}/limits", "account", "/v1/accounts/{account_id}/limits",
-          owner="account"),
+          owner="account", pin=PAY),
     Route("POST", "/api/accounts/{account_id}/alias", "account", "/v1/accounts/{account_id}/alias",
           owner="account"),
     Route("POST", "/api/accounts/{account_id}/holders", "account", "/v1/accounts/{account_id}/holders",
+          owner="account", pin=PAY),
+    Route("GET", "/api/accounts/{account_id}/nominees", "account", "/v1/accounts/{account_id}/nominees",
           owner="account"),
+    Route("POST", "/api/accounts/{account_id}/nominees", "account", "/v1/accounts/{account_id}/nominees",
+          owner="account", pin=APP),
+    Route("DELETE", "/api/accounts/{account_id}/nominees/{nominee_id}", "account",
+          "/v1/accounts/{account_id}/nominees/{nominee_id}", owner="account", pin=APP),
     Route("GET", "/api/accounts/{account_id}/balance", "ledger", "/v1/accounts/{account_id}/balance",
           owner="account"),
     Route("GET", "/api/accounts/{account_id}/transactions", "ledger", "/v1/accounts/{account_id}/entries",
@@ -70,7 +103,7 @@ ROUTES: list[Route] = [
     Route("GET", "/api/aliases/{alias}", "account", "/v1/aliases/{alias}"),
 
     # ---- payments
-    Route("POST", "/api/payments", "intake", "/v1/payments"),
+    Route("POST", "/api/payments", "intake", "/v1/payments", pin=PAY),
     Route("GET", "/api/payments", "intake", "/v1/payments"),
     Route("GET", "/api/payments/{txn_id}", "intake", "/v1/payments/{txn_id}"),
     Route("POST", "/api/payments/{txn_id}/confirm", "intake", "/v1/payments/{txn_id}/confirm"),
@@ -80,11 +113,11 @@ ROUTES: list[Route] = [
     Route("GET", "/api/deposits/rates", "deposits", "/v1/rates", P),
     Route("GET", "/api/deposits/quote", "deposits", "/v1/quote", P),
     Route("GET", "/api/deposits", "deposits", "/v1/deposits"),
-    Route("POST", "/api/deposits/fd", "deposits", "/v1/deposits/fd"),
-    Route("POST", "/api/deposits/rd", "deposits", "/v1/deposits/rd"),
+    Route("POST", "/api/deposits/fd", "deposits", "/v1/deposits/fd", pin=APP),
+    Route("POST", "/api/deposits/rd", "deposits", "/v1/deposits/rd", pin=APP),
     Route("GET", "/api/deposits/{deposit_id}", "deposits", "/v1/deposits/{deposit_id}"),
     Route("GET", "/api/deposits/{deposit_id}/closure-quote", "deposits", "/v1/deposits/{deposit_id}/closure-quote"),
-    Route("POST", "/api/deposits/{deposit_id}/close", "deposits", "/v1/deposits/{deposit_id}/close"),
+    Route("POST", "/api/deposits/{deposit_id}/close", "deposits", "/v1/deposits/{deposit_id}/close", pin=APP),
 
     # ---- statements (PDF). "interim" must come before "{period}": the first matching route wins.
     Route("GET", "/api/accounts/{account_id}/statements", "deposits", "/v1/accounts/{account_id}/statements",

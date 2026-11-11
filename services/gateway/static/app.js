@@ -151,6 +151,12 @@
 
   // opt.accept: extra status codes to hand back instead of throwing; opt.full: return {status, data};
   // opt.blob: return the response as a file. A Blob body is uploaded as the file itself.
+  // opt.background: the app checking something on its own (the inbox): it doesn't keep an idle
+  // session awake, and never brings up the lock screen.
+  //
+  // Two answers are handled here for every caller, so no screen has to:
+  //   423 SESSION_LOCKED  the lock screen comes up; once unlocked the request is sent again
+  //   428 PIN_REQUIRED    the PIN dialog comes up; the request is sent again with the PIN
   async function api(method, path, body, opt = {}) {
     const s = store.session;
     const headers = { ...(opt.headers || {}) };
@@ -158,6 +164,8 @@
     if (file) headers["Content-Type"] = body.type || "application/octet-stream";
     else if (body !== undefined) headers["Content-Type"] = "application/json";
     if (s && !opt.anonymous) headers.Authorization = "Bearer " + s.access;
+    if (opt.background) headers["X-Background"] = "1";
+    if (opt.pin) headers["X-Pin"] = opt.pin;
     let res;
     try {
       res = await fetch(path, { method, headers, body: file ? body : body !== undefined ? JSON.stringify(body) : undefined });
@@ -175,6 +183,28 @@
     const text = await res.text();
     let data = null;
     if (text) { try { data = JSON.parse(text); } catch { data = text; } }
+    const code = data && data.error;
+    if (opt.raw) {                         // the caller handles every answer itself
+      if (!res.ok && !(opt.accept || []).includes(res.status)) throw new ApiError(res.status, messageOf(data, res.status), data);
+      return opt.full ? { status: res.status, data } : data;
+    }
+    if (res.status === 423 && code === "SESSION_LOCKED" && s && !opt.anonymous) {
+      if (opt.background) throw new ApiError(423, "Locked");
+      await lockScreen();
+      return api(method, path, body, opt);
+    }
+    if (res.status === 428 && code === "PIN_REQUIRED") {
+      const pin = await askPin(data.details.kind);
+      return api(method, path, body, { ...opt, pin });
+    }
+    if (res.status === 403 && code === "PIN_WRONG") {
+      const pin = await askPin(data.details.kind, data.message);
+      return api(method, path, body, { ...opt, pin });
+    }
+    if (res.status === 428 && code === "PIN_NOT_SET") {
+      await setPinDialog(data.details.kind, `You need ${PIN_NAME[data.details.kind]} for this. Set it now.`);
+      return api(method, path, body, { ...opt, pin: undefined });
+    }
     if (!res.ok && !(opt.accept || []).includes(res.status)) throw new ApiError(res.status, messageOf(data, res.status), data);
     return opt.full ? { status: res.status, data } : data;
   }
@@ -223,6 +253,176 @@
   }
   const amountInput = (name, value, extra) => h("div", { class: "amount-input" },
     h("input", { name, inputmode: "decimal", autocomplete: "off", required: true, placeholder: "0.00", value, ...(extra || {}) }));
+
+  // ------------------------------------------------------------------ PINs and the lock screen
+
+  const PIN_NAME = { PAYMENT: "your payment PIN", APP: "your app PIN" };
+  const PIN_LEN = { PAYMENT: 6, APP: 4 };
+  const PIN_USE = {
+    PAYMENT: "Approves money leaving: payments, new payees, higher limits and new joint holders.",
+    APP: "Approves deposits and nominees, and unlocks the app after 5 minutes idle.",
+  };
+  const cancelled = () => new ApiError(0, "Cancelled. Nothing was done.");
+
+  function pinInput(name, kind, extra) {
+    const n = PIN_LEN[kind];
+    return h("input", { name, type: "password", inputmode: "numeric", autocomplete: "off", required: true, class: "pin",
+      pattern: `[0-9]{${n}}`, minlength: n, maxlength: n, title: `${n} digits`, size: n, ...(extra || {}) });
+  }
+
+  // Asks for a PIN; resolves with it, or rejects if the customer cancels.
+  function askPin(kind, problem) {
+    return new Promise((resolve, reject) => {
+      let given = false;
+      const d = dialog((close) => {
+        const input = pinInput("pin", kind, { "aria-label": PIN_NAME[kind] });
+        const form = h("form", { class: "pin-ask" },
+          h("h2", null, `Enter ${PIN_NAME[kind]}`),
+          h("p", { class: "lead" }, PIN_USE[kind]),
+          h("div", { class: "field" }, input, problem && h("p", { class: "help bad", role: "alert" }, problem)),
+          h("div", { class: "actions" }, h("button", { type: "button", class: "quiet", onclick: close }, "Cancel"),
+            h("button", { type: "submit" }, "Confirm")),
+          h("p", { class: "muted small", style: "margin-top:16px" }, "Forgot it? ",
+            h("a", { href: "#/security", onclick: close }, "Reset it on the Security page"), "."));
+        form.addEventListener("submit", (e) => { e.preventDefault(); given = true; resolve(input.value); close(); });
+        setTimeout(() => input.focus(), 0);
+        return form;
+      });
+      d.addEventListener("gone", () => { if (!given) reject(cancelled()); });
+    });
+  }
+
+  // First time: the password. Changing: the current PIN. Resolves once saved.
+  function setPinDialog(kind, lead, { change } = {}) {
+    const n = PIN_LEN[kind];
+    return new Promise((resolve, reject) => {
+      let saved = false;
+      const d = formDialog({
+        title: `${change ? "Change" : "Set"} ${PIN_NAME[kind]}`, submit: "Save PIN",
+        lead: lead || PIN_USE[kind],
+        fields: [
+          change ? field(`Current ${n}-digit PIN`, pinInput("current_pin", kind))
+            : field("Your password", h("input", { name: "password", type: "password", autocomplete: "current-password", required: true })),
+          h("div", { class: "row" }, field(`New ${n}-digit PIN`, pinInput("pin", kind)), field("Type it again", pinInput("again", kind))),
+          h("p", { class: "help" }, kind === "APP"
+            ? "It can't be the first or last four digits of your payment PIN. Avoid 1234 or 1111."
+            : "Your app PIN can't be its first or last four digits. Avoid 123456 or 111111."),
+        ],
+        onSubmit: async (v) => {
+          if (v.pin !== v.again) throw new Error("The two PINs don't match.");
+          const body = change ? { pin: v.pin, current_pin: v.current_pin } : { pin: v.pin, password: v.password };
+          await api("PUT", `/api/auth/pins/${kind.toLowerCase()}`, body, { raw: true });
+          saved = true;
+          toast(`${PIN_NAME[kind].replace("your ", "Your ")} is ${change ? "changed" : "set"}`);
+        },
+      });
+      d.addEventListener("gone", () => (saved ? resolve() : reject(cancelled())));
+    });
+  }
+
+  function resetPinDialog(kind) {
+    return formDialog({
+      title: `Reset ${PIN_NAME[kind]}`, submit: "Send me a code",
+      lead: "Forgotten, or locked after three wrong tries? We'll send a code to your email and to this app's inbox.",
+      fields: [],
+      onSubmit: async () => {
+        await api("POST", `/api/auth/pins/${kind.toLowerCase()}/reset-code`, undefined, { raw: true });
+        pollInbox();
+        const n = PIN_LEN[kind];
+        formDialog({
+          title: `Reset ${PIN_NAME[kind]}`, submit: "Save new PIN",
+          lead: "Enter the 6-digit code we just sent (it's in your Inbox too), your password, and the new PIN.",
+          fields: [
+            field("Code", h("input", { name: "code", inputmode: "numeric", autocomplete: "one-time-code", required: true, pattern: "[0-9]{6}", maxlength: 6 })),
+            field("Your password", h("input", { name: "password", type: "password", autocomplete: "current-password", required: true })),
+            h("div", { class: "row" }, field(`New ${n}-digit PIN`, pinInput("new_pin", kind)), field("Type it again", pinInput("again", kind))),
+          ],
+          onSubmit: async (v) => {
+            if (v.new_pin !== v.again) throw new Error("The two PINs don't match.");
+            await api("POST", `/api/auth/pins/${kind.toLowerCase()}/reset`, { code: v.code, password: v.password, new_pin: v.new_pin }, { raw: true });
+            toast("PIN reset. Payments to new payees get an extra check for a day.");
+            render();
+          },
+        });
+      },
+    });
+  }
+
+  // The lock screen: a modal above everything, which Escape can't close. Every request that
+  // met a locked session waits on the same promise and is sent again once it resolves.
+  let unlocking = null;
+  function lockScreen() {
+    unlocking ||= new Promise((resolve) => {
+      const s = store.session;
+      let usePassword = false, done = false;
+      const d = h("dialog", { class: "lock", "aria-labelledby": "lock-title" });
+      const problem = h("p", { class: "help bad", role: "alert" });
+      const input = h("div");
+      const unlockBtn = h("button", { type: "submit" }, "Unlock");
+      const swap = h("button", { type: "button", class: "link" });
+      function draw() {
+        input.replaceChildren(usePassword
+          ? h("input", { name: "secret", type: "password", autocomplete: "current-password", required: true, "aria-label": "Password" })
+          : pinInput("secret", "APP", { "aria-label": "App PIN" }));
+        swap.textContent = usePassword ? "Use my app PIN" : "Use my password instead";
+        lead.textContent = usePassword ? "Enter your password to carry on." : "Enter your 4-digit app PIN to carry on where you were.";
+        setTimeout(() => input.querySelector("input").focus(), 0);
+      }
+      swap.addEventListener("click", () => { usePassword = !usePassword; problem.textContent = ""; draw(); });
+      const lead = h("p", { class: "lead" });
+      const form = h("form", null,
+        h("div", { class: "lock-mark", "aria-hidden": "true" }),
+        h("h2", { id: "lock-title" }, "Locked"),
+        h("p", { class: "muted" }, `Signed in as ${s?.name || "you"}. We lock the app after 5 minutes without use, so nobody can pick it up where you left it.`),
+        lead, h("div", { class: "field" }, input, problem),
+        h("div", { class: "actions" }, unlockBtn),
+        h("p", { class: "small", style: "margin-top:18px;display:flex;gap:18px;flex-wrap:wrap" }, swap,
+          h("button", { type: "button", class: "link", onclick: () => { done = true; d.close(); signOut(); } }, "Sign out")));
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        if (unlockBtn.disabled) return;
+        const secret = input.querySelector("input").value;
+        unlockBtn.disabled = true; problem.textContent = "";
+        try {
+          const r = await api("POST", "/api/auth/unlock", usePassword ? { password: secret } : { pin: secret }, { raw: true, full: true, accept: [403, 428] });
+          if (r.status === 428) { usePassword = true; draw(); problem.textContent = "You haven't set an app PIN yet. Use your password this time."; return; }
+          if (r.status === 403) {
+            const left = r.data?.details?.attempts_left;
+            problem.textContent = left != null ? `That's not right. ${left} ${left === 1 ? "try" : "tries"} left.` : "That's not right.";
+            input.querySelector("input").select();
+            return;
+          }
+          done = true; idle.last = Date.now(); d.close(); resolve();
+        } catch (ex) { if (store.session) problem.textContent = ex.message; } finally { unlockBtn.disabled = false; }
+      });
+      d.addEventListener("cancel", (e) => e.preventDefault());           // Escape doesn't get you in
+      d.addEventListener("close", () => { d.remove(); if (!done) resolve(); });
+      d.append(form);
+      document.body.append(d);
+      draw();
+      d.showModal();
+    }).finally(() => { unlocking = null; });
+    return unlocking;
+  }
+
+  // The server locks an idle session on its own; the app also locks the screen after the same
+  // time without a touch or key press, so whatever is on screen is hidden too.
+  const idle = { last: Date.now(), timer: null };
+  ["pointerdown", "keydown", "wheel", "touchstart"].forEach((ev) =>
+    addEventListener(ev, () => { if (!unlocking) idle.last = Date.now(); }, { passive: true, capture: true }));
+  async function lockNow() {
+    try { await api("POST", "/api/auth/lock", undefined, { raw: true }); } catch { /* the server locks it anyway */ }
+    if (store.session) await lockScreen();
+  }
+  function startIdleWatch() {
+    if (idle.timer) return;
+    idle.last = Date.now();
+    idle.timer = setInterval(() => {
+      const s = store.session;
+      if (!s || s.kind !== "customer" || unlocking) return;
+      if (Date.now() - idle.last > (s.idleLock || 300) * 1000) lockNow();
+    }, 5000);
+  }
 
   // Private files (KYC documents, statements) need the access token, so they are fetched and
   // shown from memory rather than linked to.
@@ -356,10 +556,10 @@
   function signOut(expired) {
     const s = store.session;
     if (s && !expired) {
-      const path = s.kind === "customer" ? "/api/auth/logout" : null;
-      if (path) fetch(path, { method: "POST", headers: { Authorization: "Bearer " + s.access } }).catch(() => {});
+      const path = s.kind === "customer" ? "/api/auth/logout" : "/api/staff/logout";
+      fetch(path, { method: "POST", headers: { Authorization: "Bearer " + s.access } }).catch(() => {});
     }
-    clearInterval(state.poll); state.poll = null; state.me = null; state.unread = 0; state.seenNotifications = null;
+    clearInterval(state.poll); state.poll = null; clearInterval(idle.timer); idle.timer = null; state.me = null; state.unread = 0; state.seenNotifications = null;
     store.session = null;
     if (expired) { state.next = location.hash; toast("Your session ended. Sign in again.", true); }
     render();
@@ -393,9 +593,12 @@
         href === "/inbox" && h("span", { class: "badge", id: "unread", hidden: !state.unread }, state.unread))),
       h("div", { class: "spacer" }),
       h("div", { class: "who" }, h("strong", null, s.name), s.kind === "staff" ? words(s.role) : s.email),
+      s.kind === "customer" && h("a", { href: "#", class: "desktop-only", id: "lock-now", onclick: (e) => { e.preventDefault(); lockNow(); } }, "Lock"),
       h("a", { href: "#", class: "desktop-only", onclick: (e) => { e.preventDefault(); signOut(); } }, "Sign out"));
     const top = h("div", { class: "mobile-top" }, "Unbeatable Bank",
-      h("button", { class: "quiet small", type: "button", onclick: () => signOut() }, "Sign out"));
+      h("div", { class: "actions" },
+        s.kind === "customer" && h("button", { class: "quiet small", type: "button", onclick: () => lockNow() }, "Lock"),
+        h("button", { class: "quiet small", type: "button", onclick: () => signOut() }, "Sign out")));
     return h("div", { class: "shell" }, rail, h("main", { id: "main" }, top, content));
   }
 
@@ -417,7 +620,7 @@
     const holder = h("div", null, h("p", { class: "skeleton" }, "Loading…"));
     $app.replaceChildren(shell(s, path, holder));
     window.scrollTo(0, 0);
-    if (s.kind === "customer") startPolling();
+    if (s.kind === "customer") { startPolling(); startIdleWatch(); }
     try {
       const node = await match[0](...match[1], query);
       if (seq === state.renderSeq) holder.replaceChildren(node);
@@ -446,7 +649,7 @@
   async function pollInbox() {
     if (store.session?.kind !== "customer") return;
     let items;
-    try { items = await get("/api/notifications?limit=50"); } catch { return; }
+    try { items = await api("GET", "/api/notifications?limit=50", undefined, { background: true }); } catch { return; }
     const fresh = state.seenNotifications ? items.filter((n) => !state.seenNotifications.has(n.id)) : [];
     state.seenNotifications = new Set(items.map((n) => n.id));
     state.unread = items.filter((n) => !n.read).length;
@@ -463,6 +666,35 @@
 
   // ------------------------------------------------------------------ sign-in and sign-up
 
+  function forgotPasswordDialog() {
+    formDialog({
+      title: "Reset your password", submit: "Send me a code",
+      lead: "We'll email a code to the address you registered with. You'll also need your date of birth.",
+      fields: field("Email or mobile number", h("input", { name: "identifier", autocomplete: "username", required: true })),
+      onSubmit: async (v) => {
+        const raw = v.identifier.trim();
+        const identifier = /^[6-9]\d{9}$/.test(raw) ? "+91" + raw : raw.toLowerCase();
+        await api("POST", "/api/auth/password/forgot", { identifier }, { anonymous: true });
+        formDialog({
+          title: "Choose a new password", submit: "Save new password",
+          lead: "If that's your login, the code is in your email now. Every device you're signed in on will be signed out.",
+          fields: [
+            field("6-digit code", h("input", { name: "code", inputmode: "numeric", autocomplete: "one-time-code", required: true, pattern: "[0-9]{6}", maxlength: 6 })),
+            field("Date of birth", h("input", { name: "date_of_birth", type: "date", required: true })),
+            h("div", { class: "row" },
+              field("New password", h("input", { name: "new_password", type: "password", autocomplete: "new-password", required: true, minlength: 8 })),
+              field("Type it again", h("input", { name: "again", type: "password", autocomplete: "new-password", required: true, minlength: 8 }))),
+          ],
+          onSubmit: async (w) => {
+            if (w.new_password !== w.again) throw new Error("The two passwords don't match.");
+            await api("POST", "/api/auth/password/reset", { identifier, code: w.code.trim(), date_of_birth: w.date_of_birth, new_password: w.new_password }, { anonymous: true });
+            toast("Password changed. Sign in with the new one.");
+          },
+        });
+      },
+    });
+  }
+
   function viewGate(mode) {
     document.title = "Unbeatable Bank";
     const error = h("p", { class: "help bad", role: "alert" });
@@ -473,16 +705,44 @@
     const enter = () => { const next = state.next; state.next = null; if (next && next !== "#/") location.hash = next; render(); };
     if (!state.next && /^#\/(pay|accounts|deposits|inbox|security|receive)/.test(location.hash)) state.next = location.hash;
 
-    async function signIn(identifier, password) {
-      const t = await api("POST", "/api/auth/login",
-        { identifier, password, device_fingerprint: deviceFingerprint(), device_label: deviceLabel() }, { anonymous: true });
-      store.session = { kind: "customer", access: t.access_token, refresh: t.refresh_token, name: "Customer", email: identifier };
+    async function finishSignIn(t, identifier) {
+      store.session = { kind: "customer", access: t.access_token, refresh: t.refresh_token, name: "Customer", email: identifier,
+        idleLock: t.idle_lock_seconds || 300 };
       try {
         const me = await get("/api/me");
         store.session = { ...store.session, name: me.full_name, email: me.email };
       } catch { /* the profile loads again on the home page */ }
-      if (t.new_device) toast("New device: we've noted this sign-in in your security log.");
+      if (t.new_device) toast("New device confirmed. We've told you about it by email and in your inbox.");
       enter();
+    }
+
+    async function signIn(identifier, password) {
+      const r = await api("POST", "/api/auth/login",
+        { identifier, password, device_fingerprint: deviceFingerprint(), device_label: deviceLabel() }, { anonymous: true, full: true });
+      if (r.status === 202) { panel.replaceChildren(...deviceCodeStep(r.data, identifier)); return; }
+      await finishSignIn(r.data, identifier);
+    }
+
+    // A device the bank hasn't seen: the password was right, now the code we sent.
+    function deviceCodeStep(challenge, identifier) {
+      const btn = h("button", { type: "submit" }, "Confirm and sign in");
+      const code = h("input", { name: "code", inputmode: "numeric", autocomplete: "one-time-code", required: true,
+        pattern: "[0-9]{6}", maxlength: 6, class: "pin", "aria-label": "6-digit code" });
+      const form = h("form", { id: "device-code" }, field("6-digit code", code), h("div", { class: "field" }, error), btn);
+      form.addEventListener("submit", (e) => {
+        e.preventDefault();
+        submitting(btn, async () => {
+          const t = await api("POST", "/api/auth/login/verify", { challenge_id: challenge.challenge_id, code: code.value.trim() }, { anonymous: true });
+          await finishSignIn(t, identifier);
+        });
+      });
+      setTimeout(() => code.focus(), 0);
+      return [h("h2", null, "Is this you?"),
+        h("p", { class: "muted" }, "This is the first time you've signed in on this device. ", challenge.message || "We sent you a code.",
+          " It expires in 5 minutes."),
+        form,
+        h("p", { class: "muted small", style: "margin-top:20px" }, "Didn't ask for this? Someone has your password: ",
+          h("button", { class: "link", type: "button", onclick: forgotPasswordDialog }, "reset it now"), ".")];
     }
 
     const forms = {
@@ -498,7 +758,8 @@
           const id = /^[6-9]\d{9}$/.test(v.identifier.trim()) ? "+91" + v.identifier.trim() : v.identifier.trim().toLowerCase();
           submitting(btn, () => signIn(id, v.password));
         });
-        return [h("h2", null, "Sign in"), h("p", { class: "muted" }, "Use the email or mobile number you registered with."), form];
+        return [h("h2", null, "Sign in"), h("p", { class: "muted" }, "Use the email or mobile number you registered with."), form,
+          h("p", { class: "small", style: "margin-top:14px" }, h("button", { class: "link", type: "button", onclick: forgotPasswordDialog }, "Forgot your password?"))];
       },
       register: () => {
         const btn = h("button", { type: "submit" }, "Create my login");
@@ -550,6 +811,7 @@
       },
     };
     if (!forms[mode]) mode = "signin";
+    const panel = h("div", { id: "gate-panel" }, forms[mode]());
     const tabs = h("div", { class: "seg", role: "group", "aria-label": "Choose" },
       [["signin", "Sign in"], ["register", "Open an account"], ["staff", "Staff"]].map(([key, label]) =>
         h("button", { type: "button", "aria-pressed": String(key === mode), onclick: () => $app.replaceChildren(viewGate(key)) }, label)));
@@ -563,7 +825,7 @@
           [["Duplicate check", "One reference, one payment"], ["Rate limits", "Shared by every server"],
             ["Risk engine", "Scores device, payee and pattern"], ["Double-entry ledger", "Debits always equal credits"],
             ["Stream analytics", "Finds rings and mule accounts"]].map(([a, b]) => h("li", null, h("span", null, a), h("span", null, b))))),
-      h("div", { class: "form" }, h("div", null, tabs), forms[mode](),
+      h("div", { class: "form" }, h("div", null, tabs), panel,
         h("p", { class: "muted small", style: "margin-top:28px" }, "Been given an Unbeatable Bank statement? ",
           h("button", { class: "link", type: "button", onclick: checkStatementDialog }, "Check it is genuine"))));
   }
@@ -647,9 +909,9 @@
   }
 
   async function viewAccount(accountId) {
-    const [a, bal, entries, statements] = await Promise.all([
+    const [a, bal, entries, statements, nominees] = await Promise.all([
       get(`/api/accounts/${accountId}`), get(`/api/accounts/${accountId}/balance`), get(`/api/accounts/${accountId}/transactions?limit=100`),
-      get(`/api/accounts/${accountId}/statements`).catch(() => null),
+      get(`/api/accounts/${accountId}/statements`).catch(() => null), get(`/api/accounts/${accountId}/nominees`).catch(() => null),
     ]);
     const active = a.status === "ACTIVE";
     const actions = payable(a) ? [
@@ -668,15 +930,15 @@
       }) }, "Set a pay ID"),
       h("button", { class: "quiet small", type: "button", onclick: () => formDialog({
         title: "Payment limits", submit: "Save limits",
-        lead: "Lower limits shrink what a thief could take. You can raise them again up to the bank's maximum.",
+        lead: "Lower limits apply at once. Higher ones start 24 hours later, so nobody can raise them and empty the account in one go. Needs your payment PIN.",
         fields: h("div", { class: "row" },
           field("Per payment", amountInput("per_txn", (a.per_txn_limit / 100).toFixed(0))),
           field("Per day", amountInput("daily", (a.daily_limit / 100).toFixed(0)))),
         onSubmit: async (v) => {
           const per = toPaise(v.per_txn), daily = toPaise(v.daily);
           if (!per || !daily) throw new Error("Enter both limits in rupees.");
-          await api("PATCH", `/api/accounts/${a.account_id}/limits`, { per_txn_limit: per, daily_limit: daily });
-          toast("Limits saved"); render();
+          const r = await api("PATCH", `/api/accounts/${a.account_id}/limits`, { per_txn_limit: per, daily_limit: daily });
+          toast(r.pending_limits_at ? `Saved. The higher limit starts ${when(r.pending_limits_at)}.` : "Limits saved"); render();
         },
       }) }, "Change limits"),
       h("button", { class: "quiet small", type: "button", onclick: () => formDialog({
@@ -715,8 +977,10 @@
           h("dt", null, "Status"), h("dd", null, statusTag(a.status)))),
         h("div", { class: "sheet" }, h("dl", { class: "facts" },
           h("dt", null, "Holders"), h("dd", null, a.holders.map((x) => `${x.full_name}${x.role === "PRIMARY" ? "" : " (joint)"}`).join(", ")),
-          h("dt", null, "Per payment"), h("dd", { class: "num" }, inr(a.per_txn_limit)),
-          h("dt", null, "Per day"), h("dd", { class: "num" }, inr(a.daily_limit)),
+          h("dt", null, "Per payment"), h("dd", { class: "num" }, inr(a.per_txn_limit),
+            a.pending_per_txn_limit && h("div", { class: "muted small" }, `${inr(a.pending_per_txn_limit)} from ${when(a.pending_limits_at)}`)),
+          h("dt", null, "Per day"), h("dd", { class: "num" }, inr(a.daily_limit),
+            a.pending_daily_limit && h("div", { class: "muted small" }, `${inr(a.pending_daily_limit)} from ${when(a.pending_limits_at)}`)),
           h("dt", null, "Opened"), h("dd", null, day(a.opened_at))),
           manage && h("div", { style: "margin-top:16px" }, manage))),
       section("Passbook", null, rows.length
@@ -727,7 +991,54 @@
         : empty("Nothing in the passbook yet", "Deposit cash at the branch or ask someone to pay you.",
           active && h("a", { class: "btn quiet", href: `#/receive?account=${a.account_id}` }, "Show my QR code"))),
       section("Statements", null, statements ? statementsPanel(a, statements)
-        : h("div", { class: "notice" }, "Statements aren't available right now. Try again in a minute.")));
+        : h("div", { class: "notice" }, "Statements aren't available right now. Try again in a minute.")),
+      nominees && section("Nominees", a.status !== "CLOSED" && h("button", { class: "quiet small", type: "button", id: "add-nominee",
+        onclick: () => addNomineeDialog(a, nominees) }, "Add a nominee"), nomineesPanel(a, nominees)));
+  }
+
+  const RELATIONS = { SPOUSE: "Spouse", CHILD: "Child", PARENT: "Parent", SIBLING: "Brother or sister", OTHER: "Someone else" };
+
+  function nomineesPanel(a, nominees) {
+    const total = nominees.reduce((t, n) => t + Number(n.share_pct), 0);
+    if (!nominees.length) {
+      return h("div", { class: "sheet", id: "nominees" }, h("p", { class: "muted" },
+        "Nobody is named to receive this money if something happens to you. Naming a nominee makes the claim simple for your family."));
+    }
+    return h("div", null, h("div", { class: "sheet flush", id: "nominees" }, h("ul", { class: "list" }, nominees.map((n) =>
+      h("li", null, h("div", { class: "main" }, h("strong", null, n.full_name),
+        h("span", { class: "muted small" }, [RELATIONS[n.relation] || words(n.relation), n.date_of_birth && `born ${day(n.date_of_birth)}`,
+          n.guardian_name && `guardian ${n.guardian_name}`].filter(Boolean).join(", "))),
+        h("div", { class: "actions" }, h("b", { class: "num" }, `${Number(n.share_pct)}%`),
+          h("button", { class: "quiet small danger", type: "button", onclick: (e) => busy(e.currentTarget, async () => {
+            await api("DELETE", `/api/accounts/${a.account_id}/nominees/${n.nominee_id}`); toast("Nominee removed"); render();
+          }) }, "Remove")))))),
+    total < 100 && h("p", { class: "help", style: "margin-top:8px" }, `${100 - total}% isn't given to anyone yet; it would go to your legal heirs.`));
+  }
+
+  function addNomineeDialog(a, nominees) {
+    const left = 100 - nominees.reduce((t, n) => t + Number(n.share_pct), 0);
+    if (left <= 0) { toast("The whole 100% is already given. Remove a nominee or lower a share first.", true); return; }
+    formDialog({
+      title: "Add a nominee", submit: "Add nominee",
+      lead: `Who should receive this account's money if something happens to you. Up to four people; ${left}% is still free. Needs your app PIN.`,
+      fields: [
+        field("Full name", h("input", { name: "full_name", required: true, minlength: 2, autocomplete: "off" })),
+        h("div", { class: "row" },
+          field("Relation", h("select", { name: "relation" }, Object.entries(RELATIONS).map(([k, v]) => h("option", { value: k }, v)))),
+          field("Date of birth", h("input", { name: "date_of_birth", type: "date", max: new Date().toISOString().slice(0, 10) }))),
+        h("div", { class: "row" },
+          field("Share", h("div", { class: "inline" }, h("input", { name: "share_pct", type: "number", min: 1, max: left, step: "0.01", value: left, required: true }),
+            h("span", { style: "align-self:center" }, "%"))),
+          field(h("span", null, "Guardian ", h("span", { class: "hint" }, "(if under 18)")), h("input", { name: "guardian_name", autocomplete: "off" }))),
+      ],
+      onSubmit: async (v) => {
+        const body = { full_name: v.full_name.trim(), relation: v.relation, share_pct: Number(v.share_pct) };
+        if (v.date_of_birth) body.date_of_birth = v.date_of_birth;
+        if (v.guardian_name.trim()) body.guardian_name = v.guardian_name.trim();
+        await api("POST", `/api/accounts/${a.account_id}/nominees`, body);
+        toast(`${body.full_name} added as a nominee`); render();
+      },
+    });
   }
 
   // ------------------------------------------------------------------ customer: payments
@@ -1000,10 +1311,51 @@
     const refreshHistory = async () => { try { drawHistory(await get("/api/payments?limit=30")); } catch { /* keep the old list */ } };
     drawHistory(payments);
 
-    return page("Pay", "Pay any Unbeatable Bank account by number, pay ID or QR code.",
+    const payees = saved.length
+      ? h("div", { class: "sheet flush", id: "payees" }, h("ul", { class: "list" }, saved.map((b) =>
+        h("li", null, h("div", { class: "main" }, h("strong", null, b.nickname || b.payee_name),
+          h("span", { class: "muted small" }, `${b.nickname ? b.payee_name + ", " : ""}${groupDigits(b.payee_account_number)}`)),
+          h("div", { class: "actions" },
+            b.in_cooling_period && tag(`New: up to ₹10,000 a payment until ${when(b.cooling_until)}`, "warn"),
+            h("button", { class: "quiet small", type: "button", onclick: () => {
+              payee.value = b.payee_account_number; channel = "TRANSFER"; key = uuid(); checkPayee();
+              amount.querySelector("input").focus(); form.scrollIntoView({ block: "nearest" });
+            } }, "Pay"),
+            h("button", { class: "quiet small danger", type: "button", onclick: (e) => busy(e.currentTarget, async () => {
+              await api("DELETE", `/api/me/beneficiaries/${b.beneficiary_id}`); toast("Payee removed"); render();
+            }) }, "Remove"))))))
+      : empty("No saved payees", "Save the people you pay often. A new payee can receive up to ₹10,000 a payment for the first 24 hours.");
+
+    return page("Pay", "Pay any Unbeatable Bank account by number, pay ID or QR code. Every payment needs your 6-digit payment PIN.",
       h("a", { class: "btn quiet", href: "#/receive" }, "Receive by QR"),
       h("div", { class: "grid-2" }, form, result),
+      section("Saved payees", h("button", { class: "quiet small", type: "button", id: "add-payee", onclick: addPayeeDialog }, "Add a payee"), payees),
       section("Payments", null, history));
+  }
+
+  function addPayeeDialog() {
+    let name = null;
+    const number = h("input", { name: "number", inputmode: "numeric", required: true, autocomplete: "off", placeholder: "12-digit account number" });
+    const help = h("p", { class: "help", role: "status" }, "We'll show you the name before saving.");
+    number.addEventListener("change", async () => {
+      name = null;
+      const n = number.value.replace(/\s/g, "");
+      if (!n) return;
+      try { const r = await get(`/api/payees/${encodeURIComponent(n)}`); name = r.display_name; help.className = "help ok"; help.textContent = `Account holder: ${r.display_name}`; }
+      catch (e) { help.className = "help bad"; help.textContent = e.status === 404 ? "No account matches that number." : e.message; }
+    });
+    formDialog({
+      title: "Add a payee", submit: "Save payee",
+      lead: "For the first 24 hours a new payee can receive up to ₹10,000 a payment: if someone else added them, you have a day to notice. Needs your payment PIN.",
+      fields: [field("Account number", number, help), field(h("span", null, "Nickname ", h("span", { class: "hint" }, "(optional)")),
+        h("input", { name: "nickname", maxlength: 40, autocomplete: "off", placeholder: "Landlord, Mum…" }))],
+      onSubmit: async (v) => {
+        const body = { payee_account_number: v.number.replace(/\s/g, "") };
+        if (v.nickname.trim()) body.nickname = v.nickname.trim();
+        const r = await api("POST", "/api/me/beneficiaries", body);
+        toast(`${r.nickname || r.payee_name} saved. Full limits from ${when(r.cooling_until)}.`); render();
+      },
+    });
   }
 
   function drawQr(canvas, text) {
@@ -1149,6 +1501,7 @@
           h("div", { class: "right" }, h("b", { class: "num" }, inr(live ? d.balance : (d.payout_amount ?? d.balance))),
             h("div", { class: "muted small" }, live ? `grows to ${inr(d.projected_maturity)}` : (d.payout_amount != null ? "paid out" : ""))),
           statusTag(d.status),
+          live && h("a", { class: "btn quiet small", href: `#/accounts/${d.deposit_id}` }, "Nominees"),
           live && h("button", { class: "quiet small", type: "button", onclick: () => closeEarly(d) }, "Close early")));
     });
 
@@ -1181,37 +1534,137 @@
         : empty("Nothing here yet", "You'll hear from us when money moves or something needs your attention."));
   }
 
+  function changeContactDialog(fieldName, current) {
+    const label = fieldName === "email" ? "email" : "mobile number";
+    formDialog({
+      title: `Change your ${label}`, submit: "Send me a code",
+      lead: `We'll send a code to your current email and to this app, so only you can make the change. For 3 days afterwards, payments to new payees may need an extra check.`,
+      fields: [
+        fieldName === "email"
+          ? field("New email", h("input", { name: "value", type: "email", autocomplete: "email", required: true }), `Now: ${current}`)
+          : field("New mobile number", h("input", { name: "value", inputmode: "numeric", autocomplete: "tel-national", required: true,
+            pattern: "[6-9][0-9]{9}", placeholder: "10 digits" }), `Now: ${current}`),
+        field("Your password", h("input", { name: "password", type: "password", autocomplete: "current-password", required: true })),
+      ],
+      onSubmit: async (v) => {
+        const value = fieldName === "phone" ? "+91" + v.value.trim() : v.value.trim().toLowerCase();
+        await api("POST", "/api/auth/contact", { field: fieldName, value, password: v.password });
+        pollInbox();
+        formDialog({
+          title: "Enter the code", submit: `Change my ${label}`,
+          lead: "It's in your current email and in your Inbox here.",
+          fields: field("6-digit code", h("input", { name: "code", inputmode: "numeric", autocomplete: "one-time-code", required: true, pattern: "[0-9]{6}", maxlength: 6 })),
+          onSubmit: async (w) => {
+            await api("POST", "/api/auth/contact/confirm", { code: w.code.trim() });
+            toast(`Your ${label} is changed. We've told your old one too.`);
+            render();
+          },
+        });
+      },
+    });
+  }
+
+  function changePasswordDialog() {
+    formDialog({
+      title: "Change your password", submit: "Change password",
+      lead: "Every other device signed in to your account will be signed out.",
+      fields: [
+        field("Current password", h("input", { name: "current_password", type: "password", autocomplete: "current-password", required: true })),
+        h("div", { class: "row" },
+          field("New password", h("input", { name: "new_password", type: "password", autocomplete: "new-password", required: true, minlength: 8 })),
+          field("Type it again", h("input", { name: "again", type: "password", autocomplete: "new-password", required: true, minlength: 8 }))),
+      ],
+      onSubmit: async (v) => {
+        if (v.new_password !== v.again) throw new Error("The two passwords don't match.");
+        const r = await api("POST", "/api/auth/password", { current_password: v.current_password, new_password: v.new_password });
+        toast(`Password changed. ${r.other_sessions_ended} other session${r.other_sessions_ended === 1 ? "" : "s"} signed out.`);
+        render();
+      },
+    });
+  }
+
+  function blockEverythingDialog() {
+    formDialog({
+      title: "Block everything?", submit: "Block everything", danger: true,
+      lead: "Every account is frozen at once, every device is signed out, including this one, and a fraud officer is told. "
+        + "Money can still come in. Unfreezing needs the bank to speak to you.",
+      fields: h("label", { class: "check" }, h("input", { type: "checkbox", name: "sure", required: true }),
+        " I think someone else has got into my account"),
+      onSubmit: async () => {
+        const r = await api("POST", "/api/me/lockdown", undefined, { full: true, accept: [207] });
+        const d = r.data;
+        toast(`Blocked. ${d.accounts_frozen.length} account${d.accounts_frozen.length === 1 ? "" : "s"} frozen`
+          + `${d.case_number ? `, case ${d.case_number} opened` : ""}. Call the bank on 1800 000 0000.`, d.accounts_failed.length > 0);
+        if (d.accounts_failed.length) toast(`We couldn't freeze ${d.accounts_failed.join(", ")}. Call the bank now.`, true);
+        setTimeout(() => signOut(true), 400);
+      },
+    });
+  }
+
+  function pinRow(kind, st) {
+    const n = PIN_LEN[kind];
+    const title = kind === "PAYMENT" ? "Payment PIN" : "App PIN";
+    const state = !st.set ? tag("Not set", "warn") : st.locked ? tag(`Locked until ${when(st.locked_until)}`, "bad") : tag("Set", "good");
+    const act = (label, fn, cls) => h("button", { class: `quiet small ${cls || ""}`, type: "button", onclick: () => fn().then(render, () => {}) }, label);
+    return h("li", { "data-pin": kind },
+      h("div", { class: "main" }, h("strong", null, `${title} `, h("span", { class: "muted small" }, `${n} digits`)),
+        h("span", { class: "muted small" }, PIN_USE[kind])),
+      h("div", { class: "actions" }, state,
+        !st.set && act("Set", () => setPinDialog(kind)),
+        st.set && !st.locked && act("Change", () => setPinDialog(kind, null, { change: true })),
+        st.set && h("button", { class: "quiet small", type: "button", onclick: () => resetPinDialog(kind) }, st.locked ? "Reset to unlock" : "Forgot")));
+  }
+
   async function viewSecurity() {
-    const [me, devices, sessions, logins, kyc] = await Promise.all([loadMe(), get("/api/auth/devices"), get("/api/auth/sessions"),
-      get("/api/auth/login-history"), get("/api/kyc/documents")]);
+    const [me, devices, sessions, logins, kyc, pins] = await Promise.all([loadMe(), get("/api/auth/devices"), get("/api/auth/sessions"),
+      get("/api/auth/login-history"), get("/api/kyc/documents"), get("/api/auth/pins")]);
     const flags = (l) => [l.new_device && tag("New device", "warn"), l.impossible_travel && tag("Impossible travel", "bad")];
-    return page("Security", "Who you are to the bank, and where your account has been used.",
-      h("button", { class: "quiet", type: "button", onclick: () => signOut() }, "Sign out"),
+    const missing = ["PAYMENT", "APP"].filter((k) => !pins[k].set);
+    const deviceName = Object.fromEntries(devices.map((d) => [d.device_id, d.label]));
+    return page("Security", "Your PINs, sign-in details, and where your account has been used.",
+      [h("button", { class: "quiet", type: "button", onclick: () => lockNow() }, "Lock now"),
+        h("button", { class: "quiet", type: "button", onclick: () => signOut() }, "Sign out")],
       kycNotice(me),
+      missing.length > 0 && h("div", { class: "notice", id: "pin-notice" }, h("strong", null, "Set your PINs"),
+        "Payments need a 6-digit payment PIN; deposits and unlocking the app use a 4-digit app PIN. The two must be different."),
+      section("PINs", null, h("div", { class: "sheet flush", id: "pins" }, h("ul", { class: "list" }, pinRow("PAYMENT", pins.PAYMENT), pinRow("APP", pins.APP))),
+        h("p", { class: "muted small", style: "margin-top:10px" }, "Three wrong tries lock a PIN for 24 hours and we tell you. We never ask for your PIN by phone, email or message.")),
       h("div", { class: "sheet" }, h("dl", { class: "facts" },
         h("dt", null, "Name"), h("dd", null, me.full_name),
         h("dt", null, "Customer number"), h("dd", { class: "num" }, me.cif_number),
         h("dt", null, "Customer ID"), h("dd", { class: "small" }, me.customer_id, " ", copyBtn(me.customer_id, "Customer ID")),
         h("dt", null, "KYC"), h("dd", null, statusTag(me.kyc_status)),
-        h("dt", null, "Email"), h("dd", null, me.email),
-        h("dt", null, "Mobile"), h("dd", { class: "num" }, me.phone),
+        h("dt", null, "Email"), h("dd", null, me.email, " ", h("button", { class: "link small", type: "button", onclick: () => changeContactDialog("email", me.email) }, "Change")),
+        h("dt", null, "Mobile"), h("dd", { class: "num" }, me.phone, " ", h("button", { class: "link small", type: "button", onclick: () => changeContactDialog("phone", me.phone) }, "Change")),
+        h("dt", null, "Password"), h("dd", null, "••••••••", " ", h("button", { class: "link small", type: "button", onclick: changePasswordDialog }, "Change")),
         me.pan_last4 && [h("dt", null, "PAN"), h("dd", { class: "num" }, "•••••" + me.pan_last4)],
         h("dt", null, "Daily transfer limit"), h("dd", { class: "num" }, inr(me.daily_transfer_limit)))),
       section("Identity documents", h("span", { class: "muted small" }, `JPEG, PNG or PDF, up to ${kyc.max_bytes / 1048576} MB each`),
         kycPanel(kyc, render),
         h("p", { class: "muted small", style: "margin-top:10px" }, "Only KYC officers can open these, and every time one does it is recorded. A document we don't accept is deleted straight away.")),
-      section("Devices that have signed in", null, h("div", { class: "sheet flush" }, h("ul", { class: "list" }, devices.map((d) =>
+      section("Signed in now", null, h("div", { class: "sheet flush", id: "sessions" }, h("ul", { class: "list" }, sessions.map((x) =>
+        h("li", null, h("div", { class: "main" }, h("strong", null, deviceName[x.device_id] || x.ip || "Unknown device"),
+          h("span", { class: "muted small" }, `Since ${when(x.created_at)}${x.ip ? ` from ${x.ip}` : ""}${x.last_seen ? `, last active ${when(x.last_seen)}` : ""}`)),
+          h("div", { class: "actions" }, x.current ? tag("This device", "good") : x.locked && tag("Locked", ""),
+            !x.current && h("button", { class: "quiet small danger", type: "button", onclick: (e) => busy(e.currentTarget, async () => {
+              await api("DELETE", `/api/auth/sessions/${x.session_id}`); toast("Signed out there"); render();
+            }) }, "Sign out"))))))),
+      section("Devices you've used", null, h("div", { class: "sheet flush" }, h("ul", { class: "list" }, devices.map((d) =>
         h("li", null, h("div", { class: "main" }, h("strong", null, d.label || "Unnamed device"),
           h("span", { class: "muted small" }, `First seen ${when(d.first_seen)}, last used ${when(d.last_seen)}${d.last_ip ? ` from ${d.last_ip}` : ""}`)),
-          h("button", { class: "quiet small danger", type: "button", onclick: (e) => busy(e.currentTarget, async () => {
-            await api("DELETE", `/api/auth/devices/${d.device_id}`); toast("Device removed and signed out"); render();
-          }) }, "Remove")))))),
-      section("Active sessions", null, h("div", { class: "sheet flush" }, h("ul", { class: "list" }, sessions.map((x) =>
-        h("li", null, h("div", { class: "main" }, h("strong", null, x.ip || "Unknown address"), h("span", { class: "muted small" }, `Since ${when(x.created_at)}. ${x.user_agent || ""}`))))))),
+          h("div", { class: "actions" }, d.trusted === false && tag("Not confirmed", "warn"),
+            h("button", { class: "quiet small danger", type: "button", onclick: (e) => busy(e.currentTarget, async () => {
+              await api("DELETE", `/api/auth/devices/${d.device_id}`); toast("Device removed and signed out"); render();
+            }) }, "Remove"))))))),
       section("Sign-in history", null, h("div", { class: "sheet flush table-wrap" }, h("table", null,
         h("thead", null, h("tr", null, h("th", null, "When"), h("th", null, "Result"), h("th", null, "From"), h("th", null, "Notes"))),
         h("tbody", null, logins.map((l) => h("tr", null, h("td", { class: "nowrap" }, when(l.at)),
-          h("td", null, tag(words(l.result), /SUCCESS|OK/i.test(l.result) ? "good" : "bad")), h("td", { class: "num" }, l.ip || ""), h("td", null, h("div", { class: "actions" }, flags(l))))))))));
+          h("td", null, tag(words(l.result), /SUCCESS|OK/i.test(l.result) ? "good" : l.result === "CHALLENGED" ? "warn" : "bad")),
+          h("td", { class: "num" }, l.ip || ""), h("td", null, h("div", { class: "actions" }, flags(l))))))))),
+      section("Something wrong?", null, h("div", { class: "sheet danger-zone" },
+        h("div", null, h("strong", null, "Block everything"),
+          h("p", { class: "muted small" }, "Lost your phone, or see a payment you didn't make? This freezes every account and signs out every device in one go.")),
+        h("button", { class: "danger", type: "button", id: "block-everything", onclick: blockEverythingDialog }, "Block everything"))));
   }
 
   // ------------------------------------------------------------------ staff: fraud desk

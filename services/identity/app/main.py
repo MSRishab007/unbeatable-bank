@@ -14,6 +14,9 @@ Environment:
     RATELIMIT_GRPC    optional: login throttling
     STAFF_BOOTSTRAP   optional "id:ROLE:password,..." created at startup
     AUTO_VERIFY_KYC   "true" skips manual KYC approval (demos and load tests)
+    IDLE_LOCK_SECONDS  customer session locks after this long idle (default 300)
+    STAFF_IDLE_SECONDS staff session ends after this long idle (default 900)
+    PIN_PEPPER        optional secret mixed into PIN hashes (default: derived from JWT_SECRET)
 """
 
 import hashlib
@@ -37,7 +40,7 @@ from ubcommon.metrics import instrument
 from ubcommon.notify import get_notifier
 from ubcommon.objstore import get_objstore
 
-from . import kyc, service
+from . import kyc, pins, recovery, service
 
 _state: dict = {}
 
@@ -69,6 +72,25 @@ class HttpAccounts:
                             headers={"X-Actor": actor}).raise_for_status()
         except httpx.HTTPError as e:
             raise service.Unavailable("account service unavailable; try again") from e
+
+    def get_customer(self, customer_id: UUID) -> dict:
+        try:
+            r = self._http.get(f"/v1/customers/{customer_id}")
+            r.raise_for_status()
+            return r.json()
+        except httpx.HTTPError as e:
+            raise service.Unavailable("account service unavailable; try again") from e
+
+    def update_contact(self, customer_id: UUID, field: str, value: str, actor: str) -> None:
+        try:
+            r = self._http.patch(f"/internal/v1/customers/{customer_id}/contact", json={field: value},
+                                 headers={"X-Actor": actor})
+        except httpx.HTTPError as e:
+            raise service.Unavailable("account service unavailable; try again") from e
+        if r.status_code == 409:
+            raise service.Conflict(f"another customer already uses that {field}", field=field)
+        if r.status_code >= 400:
+            raise service.Unavailable("could not update your details; try again")
 
 
 def _login_limiter():
@@ -108,6 +130,9 @@ def build_deps() -> service.Deps:
         login_allowed=_login_limiter(),
         auto_verify_kyc=os.getenv("AUTO_VERIFY_KYC", "false").lower() == "true",
         objstore=get_objstore(),
+        idle_lock_seconds=int(os.getenv("IDLE_LOCK_SECONDS", "300")),
+        staff_idle_seconds=int(os.getenv("STAFF_IDLE_SECONDS", "900")),
+        pin_pepper=os.getenv("PIN_PEPPER", "").encode(),
     )
 
 
@@ -173,6 +198,60 @@ class RefreshIn(BaseModel):
     refresh_token: str
 
 
+class LoginVerifyIn(BaseModel):
+    challenge_id: str
+    code: str = Field(..., min_length=6, max_length=6)
+
+
+class UnlockIn(BaseModel):
+    pin: str | None = None
+    password: str | None = None
+
+
+class PinIn(BaseModel):
+    pin: str
+    password: str | None = None
+    current_pin: str | None = None
+
+
+class PinResetIn(BaseModel):
+    code: str
+    password: str
+    new_pin: str
+
+
+class PinVerifyIn(BaseModel):
+    customer_id: UUID
+    kind: str
+    pin: str
+
+
+class PasswordChangeIn(BaseModel):
+    current_password: str
+    new_password: str = Field(..., min_length=8)
+
+
+class ForgotIn(BaseModel):
+    identifier: str
+
+
+class ResetPasswordIn(BaseModel):
+    identifier: str
+    code: str
+    date_of_birth: date
+    new_password: str = Field(..., min_length=8)
+
+
+class ContactIn(BaseModel):
+    field: str = Field(..., pattern="^(email|phone)$")
+    value: str
+    password: str
+
+
+class CodeIn(BaseModel):
+    code: str
+
+
 class StaffLoginIn(BaseModel):
     staff_id: str
     password: str
@@ -215,13 +294,26 @@ def register(body: RegisterIn, conn=Depends(get_conn), deps=Depends(get_deps)):
 
 
 @app.post("/v1/auth/login")
-def login(body: LoginIn, conn=Depends(get_conn), deps=Depends(get_deps),
+def login(body: LoginIn, response: Response, conn=Depends(get_conn), deps=Depends(get_deps),
           client_ip: str = Header("", alias="X-Client-Ip"), user_agent: str = Header("", alias="User-Agent"),
           geo: str = Header("", alias="X-Geo")):
-    """X-Geo ("lat,lon") stands in for IP geolocation, which a production system would look up itself."""
-    return service.login(conn, deps, identifier=body.identifier, password=body.password,
-                         fingerprint=body.device_fingerprint, device_label=body.device_label,
-                         ip=client_ip, user_agent=user_agent, geo=_geo(geo))
+    """X-Geo ("lat,lon") stands in for IP geolocation, which a production system would look up itself.
+
+    200 with tokens, or 202 with a challenge_id when the device is new: a code was sent to the
+    customer, and /v1/auth/login/verify with that code finishes the login."""
+    out = service.login(conn, deps, identifier=body.identifier, password=body.password,
+                        fingerprint=body.device_fingerprint, device_label=body.device_label,
+                        ip=client_ip, user_agent=user_agent, geo=_geo(geo))
+    if out.get("otp_required"):
+        response.status_code = 202
+    return out
+
+
+@app.post("/v1/auth/login/verify")
+def login_verify(body: LoginVerifyIn, conn=Depends(get_conn), deps=Depends(get_deps),
+                 client_ip: str = Header("", alias="X-Client-Ip"), user_agent: str = Header("", alias="User-Agent")):
+    return service.verify_login(conn, deps, challenge_id=body.challenge_id, code=body.code, ip=client_ip,
+                                user_agent=user_agent)
 
 
 @app.post("/v1/auth/refresh")
@@ -229,10 +321,92 @@ def refresh(body: RefreshIn, deps=Depends(get_deps)):
     return service.refresh(deps, body.refresh_token)
 
 
+def get_session_id(x_session_id: str = Header("", alias="X-Session-Id")) -> str:
+    return x_session_id
+
+
 @app.post("/v1/auth/logout", status_code=204)
-def logout(customer_id: UUID = Depends(get_customer), session_id: str = Header(..., alias="X-Session-Id"),
+def logout(customer_id: UUID = Depends(get_customer), session_id: str = Depends(get_session_id),
            deps=Depends(get_deps)):
     service.logout(deps, customer_id, session_id)
+
+
+@app.post("/v1/auth/lock")
+def lock(customer_id: UUID = Depends(get_customer), session_id: str = Depends(get_session_id),
+         deps=Depends(get_deps)):
+    return service.lock_session(deps, customer_id, session_id)
+
+
+@app.post("/v1/auth/unlock")
+def unlock(body: UnlockIn, customer_id: UUID = Depends(get_customer), session_id: str = Depends(get_session_id),
+           conn=Depends(get_conn), deps=Depends(get_deps)):
+    return service.unlock_session(conn, deps, customer_id, session_id, pin=body.pin, password=body.password)
+
+
+@app.delete("/v1/auth/sessions/{other_session_id}", status_code=204)
+def end_session(other_session_id: str, customer_id: UUID = Depends(get_customer), deps=Depends(get_deps)):
+    service.end_other_session(deps, customer_id, other_session_id)
+
+
+# ---- PINs
+
+
+@app.get("/v1/auth/pins")
+def pin_status(customer_id: UUID = Depends(get_customer), conn=Depends(get_conn), deps=Depends(get_deps)):
+    return pins.status(conn, deps, customer_id)
+
+
+@app.put("/v1/auth/pins/{kind}")
+def set_pin(kind: str, body: PinIn, customer_id: UUID = Depends(get_customer), conn=Depends(get_conn),
+            deps=Depends(get_deps)):
+    return pins.set_pin(conn, deps, customer_id, kind, body.pin, password=body.password,
+                        current_pin=body.current_pin)
+
+
+@app.post("/v1/auth/pins/{kind}/reset-code")
+def pin_reset_code(kind: str, customer_id: UUID = Depends(get_customer), conn=Depends(get_conn),
+                   deps=Depends(get_deps)):
+    return pins.request_reset(conn, deps, customer_id, kind)
+
+
+@app.post("/v1/auth/pins/{kind}/reset")
+def pin_reset(kind: str, body: PinResetIn, customer_id: UUID = Depends(get_customer), conn=Depends(get_conn),
+              deps=Depends(get_deps)):
+    return pins.reset(conn, deps, customer_id, kind, code=body.code, password=body.password, new_pin=body.new_pin)
+
+
+# ---- password and contact details
+
+
+@app.post("/v1/auth/password")
+def change_password(body: PasswordChangeIn, customer_id: UUID = Depends(get_customer),
+                    session_id: str = Depends(get_session_id), conn=Depends(get_conn), deps=Depends(get_deps)):
+    return recovery.change_password(conn, deps, customer_id, session_id, current_password=body.current_password,
+                                    new_password=body.new_password)
+
+
+@app.post("/v1/auth/password/forgot", status_code=202)
+def forgot_password(body: ForgotIn, conn=Depends(get_conn), deps=Depends(get_deps)):
+    return recovery.forgot_password(conn, deps, body.identifier)
+
+
+@app.post("/v1/auth/password/reset")
+def reset_password(body: ResetPasswordIn, conn=Depends(get_conn), deps=Depends(get_deps)):
+    return recovery.reset_password(conn, deps, identifier=body.identifier, code=body.code,
+                                   date_of_birth=body.date_of_birth, new_password=body.new_password)
+
+
+@app.post("/v1/auth/contact", status_code=202)
+def start_contact_change(body: ContactIn, customer_id: UUID = Depends(get_customer), conn=Depends(get_conn),
+                         deps=Depends(get_deps)):
+    return recovery.start_contact_change(conn, deps, customer_id, field=body.field, value=body.value,
+                                         password=body.password)
+
+
+@app.post("/v1/auth/contact/confirm")
+def confirm_contact_change(body: CodeIn, customer_id: UUID = Depends(get_customer), conn=Depends(get_conn),
+                           deps=Depends(get_deps)):
+    return recovery.confirm_contact_change(conn, deps, customer_id, code=body.code)
 
 
 @app.get("/v1/auth/devices")
@@ -247,8 +421,9 @@ def revoke_device(device_id: UUID, customer_id: UUID = Depends(get_customer), co
 
 
 @app.get("/v1/auth/sessions")
-def sessions(customer_id: UUID = Depends(get_customer), deps=Depends(get_deps)):
-    return service.list_sessions(deps, customer_id)
+def sessions(customer_id: UUID = Depends(get_customer), session_id: str = Depends(get_session_id),
+             deps=Depends(get_deps)):
+    return service.list_sessions(deps, customer_id, current=session_id)
 
 
 @app.get("/v1/auth/login-history")
@@ -261,10 +436,36 @@ def staff_login(body: StaffLoginIn, conn=Depends(get_conn), deps=Depends(get_dep
     return service.staff_login(conn, deps, body.staff_id, body.password)
 
 
+@app.post("/v1/staff/logout", status_code=204)
+def staff_logout(x_actor: str = Header(..., alias="X-Actor"), session_id: str = Depends(get_session_id),
+                 deps=Depends(get_deps)):
+    actor = parse_actor(x_actor)
+    if actor.kind != "staff":
+        raise HTTPException(status_code=403, detail="staff only")
+    service.staff_logout(deps, actor.id, session_id)
+
+
 @app.get("/internal/v1/sessions/{session_id}/active")
 def session_active(session_id: str, deps=Depends(get_deps)):
-    """Lets the gateway reject access tokens whose session was ended (e.g. device logged out)."""
     return {"active": service.session_is_active(deps, session_id)}
+
+
+@app.post("/internal/v1/sessions/{session_id}/check")
+def session_check(session_id: str, activity: bool = True, deps=Depends(get_deps)):
+    """The gateway asks this on every signed-in request: ACTIVE, LOCKED or ENDED."""
+    return service.check_session(deps, session_id, activity=activity)
+
+
+@app.post("/internal/v1/pins/verify")
+def pin_verify(body: PinVerifyIn, conn=Depends(get_conn), deps=Depends(get_deps)):
+    """The gateway asks this before forwarding a request that needs a PIN."""
+    return pins.verify(conn, deps, body.customer_id, body.kind, body.pin)
+
+
+@app.post("/internal/v1/customers/{customer_id}/lockdown")
+def lockdown(customer_id: UUID, x_actor: str = Header("system:unknown", alias="X-Actor"), conn=Depends(get_conn),
+             deps=Depends(get_deps)):
+    return service.lockdown(conn, deps, customer_id, x_actor)
 
 
 @app.post("/internal/v1/otp/issue")

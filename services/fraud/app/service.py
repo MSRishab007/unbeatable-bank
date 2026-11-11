@@ -339,6 +339,29 @@ def report_fraud(conn: psycopg.Connection, deps: Deps, customer_id: UUID, txn_id
     return case
 
 
+def customer_lockdown(conn: psycopg.Connection, deps: Deps, customer_id: UUID, account_ids: list[UUID]) -> dict:
+    """The customer pressed 'Block everything': their accounts are already frozen and their
+    sessions ended. A HIGH case puts a person on it; pressing again doesn't open another."""
+    with _cur(conn) as cur:
+        cur.execute("SELECT * FROM fraud.cases WHERE customer_id = %s AND type = 'ACCOUNT_TAKEOVER' "
+                    "AND status = 'OPEN' AND reasons ? 'CUSTOMER_LOCKDOWN'", (customer_id,))
+        existing = cur.fetchone()
+    if existing:
+        return existing
+    case = open_case(conn, type="ACCOUNT_TAKEOVER", severity="HIGH", customer_id=customer_id,
+                     account_id=account_ids[0] if account_ids else None, reasons=["CUSTOMER_LOCKDOWN"],
+                     summary=f"Customer blocked everything: {len(account_ids)} account(s) frozen, every session "
+                             "ended. Call the customer before unfreezing.",
+                     actor=f"customer:{customer_id}")
+    add_case_event(conn, case["case_id"], "CUSTOMER_LOCKDOWN", {"account_ids": [str(a) for a in account_ids]},
+                   f"customer:{customer_id}")
+    raise_alert(deps, _mid(case["case_id"], "lockdown"), type="CUSTOMER_LOCKDOWN", severity="HIGH",
+                title="Customer blocked everything", customer_id=customer_id,
+                account_id=account_ids[0] if account_ids else None, case_id=case["case_id"],
+                detail={"accounts": len(account_ids)})
+    return case
+
+
 def my_cases(conn: psycopg.Connection, customer_id: UUID) -> list[dict]:
     with _cur(conn) as cur:
         cur.execute(

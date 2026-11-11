@@ -257,11 +257,98 @@ def test_customer_sets_own_limits(conn, ledger, make_customer):
                                 actor=ACTOR)
     updated = service.update_limits(conn, acct["account_id"], daily_limit=2_000_000, per_txn_limit=500_000,
                                     actor=ACTOR)
-    assert (updated["daily_limit"], updated["per_txn_limit"]) == (2_000_000, 500_000)
+    assert (updated["daily_limit"], updated["per_txn_limit"]) == (2_000_000, 500_000)   # lowering: at once
+    assert updated["pending_limits_at"] is None
     with pytest.raises(service.AccountError):  # per-transaction above daily
         service.update_limits(conn, acct["account_id"], daily_limit=100, per_txn_limit=None, actor=ACTOR)
     assert service.list_events(conn, acct["account_id"])[0]["event_type"] == "LIMITS_CHANGED"
     assert service.verify_event_chain(conn, acct["account_id"])
+
+
+def _make_due(conn, account_id):
+    conn.execute("UPDATE account.accounts SET pending_limits_at = now() - interval '1 second' "
+                 "WHERE account_id = %s", (account_id,))
+
+
+def test_raising_a_limit_waits_a_day(conn, ledger, make_customer):
+    cid = make_customer()
+    acct = service.open_account(conn, ledger, product_type="SAVINGS", holder_ids=[cid], actor=ACTOR)
+    before = (acct["daily_limit"], acct["per_txn_limit"])
+    raised = service.update_limits(conn, acct["account_id"], daily_limit=30_000_000, per_txn_limit=None, actor=ACTOR)
+    assert (raised["daily_limit"], raised["per_txn_limit"]) == before                 # not yet
+    assert raised["pending_daily_limit"] == 30_000_000 and raised["pending_limits_at"] is not None
+    assert service.authorize(conn, acct["account_id"], cid)["daily_limit"] == before[0]
+    # a raise and a cut together: the cut is immediate, the raise waits
+    mixed = service.update_limits(conn, acct["account_id"], daily_limit=None, per_txn_limit=1_000_000, actor=ACTOR)
+    assert mixed["per_txn_limit"] == 1_000_000 and mixed["pending_daily_limit"] == 30_000_000
+    assert mixed["pending_limits_at"] == raised["pending_limits_at"]                 # the wait doesn't restart
+    _make_due(conn, acct["account_id"])
+    assert service.authorize(conn, acct["account_id"], cid)["daily_limit"] == 30_000_000   # applied when due
+    now = service.get_account(conn, acct["account_id"])
+    assert now["pending_daily_limit"] is None and now["pending_limits_at"] is None
+    assert [e["event_type"] for e in service.list_events(conn, acct["account_id"])][:3] == \
+        ["LIMITS_RAISED", "LIMITS_CHANGED", "LIMITS_CHANGED"]
+    assert service.verify_event_chain(conn, acct["account_id"])
+
+
+def test_lowering_a_limit_cancels_a_waiting_raise(conn, ledger, make_customer):
+    acct = service.open_account(conn, ledger, product_type="SAVINGS", holder_ids=[make_customer()], actor=ACTOR)
+    service.update_limits(conn, acct["account_id"], daily_limit=30_000_000, per_txn_limit=None, actor=ACTOR)
+    cut = service.update_limits(conn, acct["account_id"], daily_limit=5_000_000, per_txn_limit=None, actor=ACTOR)
+    assert cut["daily_limit"] == 5_000_000 and cut["pending_daily_limit"] is None and cut["pending_limits_at"] is None
+    with pytest.raises(service.AccountError):        # a waiting per-txn raise above the daily limit
+        service.update_limits(conn, acct["account_id"], daily_limit=None, per_txn_limit=9_000_000, actor=ACTOR)
+
+
+# ------------------------------------------------------------------ nominees, payees, contact
+
+
+def test_nominees(conn, ledger, make_customer):
+    from datetime import date as d
+    acct = service.open_account(conn, ledger, product_type="SAVINGS", holder_ids=[make_customer()], actor=ACTOR)
+    aid = acct["account_id"]
+    first = service.add_nominee(conn, aid, full_name="Meera Sharma", relation="spouse", date_of_birth=d(1975, 3, 2),
+                                share_pct=60, guardian_name=None, actor=ACTOR)
+    assert first["relation"] == "SPOUSE"
+    with pytest.raises(service.AccountError, match="guardian"):
+        service.add_nominee(conn, aid, full_name="Kabir Sharma", relation="CHILD", date_of_birth=d(2020, 1, 1),
+                            share_pct=40, guardian_name=None, actor=ACTOR)
+    with pytest.raises(service.AccountError, match="100%"):
+        service.add_nominee(conn, aid, full_name="Kabir Sharma", relation="CHILD", date_of_birth=d(2020, 1, 1),
+                            share_pct=50, guardian_name="Meera Sharma", actor=ACTOR)
+    with pytest.raises(service.AccountError, match="relation"):
+        service.add_nominee(conn, aid, full_name="Ravi", relation="FRIEND", date_of_birth=None, share_pct=10,
+                            guardian_name=None, actor=ACTOR)
+    service.add_nominee(conn, aid, full_name="Kabir Sharma", relation="CHILD", date_of_birth=d(2020, 1, 1),
+                        share_pct=40, guardian_name="Meera Sharma", actor=ACTOR)
+    assert sum(n["share_pct"] for n in service.list_nominees(conn, aid)) == 100
+    service.remove_nominee(conn, aid, first["nominee_id"], ACTOR)
+    assert [n["full_name"] for n in service.list_nominees(conn, aid)] == ["Kabir Sharma"]
+    with pytest.raises(service.NotFound):
+        service.remove_nominee(conn, aid, first["nominee_id"], ACTOR)
+    types = [e["event_type"] for e in service.list_events(conn, aid)]
+    assert types[:3] == ["NOMINEE_REMOVED", "NOMINEE_ADDED", "NOMINEE_ADDED"]
+
+
+def test_remove_beneficiary(conn, ledger, make_customer):
+    payer = make_customer()
+    payee = service.open_account(conn, ledger, product_type="SAVINGS", holder_ids=[make_customer("Arjun Mehta")],
+                                 actor=ACTOR)
+    b = service.add_beneficiary(conn, payer, payee_account_number=payee["account_number"], nickname="Arjun")
+    with pytest.raises(service.NotFound):
+        service.remove_beneficiary(conn, make_customer(), b["beneficiary_id"])      # someone else's
+    service.remove_beneficiary(conn, payer, b["beneficiary_id"])
+    assert service.list_beneficiaries(conn, payer) == []
+    again = service.add_beneficiary(conn, payer, payee_account_number=payee["account_number"])   # can re-add
+    assert again["beneficiary_id"] != b["beneficiary_id"]
+
+
+def test_update_contact(conn, make_customer):
+    a, b = make_customer(), make_customer()
+    updated = service.update_contact(conn, a, email="New.Address@Example.com")
+    assert updated["email"] == "new.address@example.com"
+    with pytest.raises(service.Conflict):
+        service.update_contact(conn, b, email="new.address@example.com")
 
 
 def test_payment_precheck(conn, ledger, make_customer):

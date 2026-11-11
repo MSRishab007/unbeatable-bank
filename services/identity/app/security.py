@@ -39,6 +39,24 @@ def new_refresh_token(session_id: str) -> tuple[str, str]:
     return f"{session_id}.{secret}", sha256(secret)
 
 
+def hash_pin(pin: str, pepper: bytes) -> str:
+    """A PIN has only 10^4 or 10^6 values, so a slow hash would not save it from someone who
+    has the table: what protects it is the server-side pepper (not in the database) and the
+    three-tries lock. HMAC keeps verification cheap enough to run on every payment."""
+    salt = os.urandom(16)
+    digest = hmac.new(pepper, salt + pin.encode(), hashlib.sha256).digest()
+    return f"hmac${base64.b64encode(salt).decode()}${base64.b64encode(digest).decode()}"
+
+
+def verify_pin(pin: str, stored: str, pepper: bytes) -> bool:
+    try:
+        _, salt, digest = stored.split("$")
+        candidate = hmac.new(pepper, base64.b64decode(salt) + pin.encode(), hashlib.sha256).digest()
+        return hmac.compare_digest(candidate, base64.b64decode(digest))
+    except (ValueError, TypeError):
+        return False
+
+
 def new_otp() -> str:
     return f"{secrets.randbelow(10 ** 6):06d}"
 

@@ -4,8 +4,9 @@
     python scripts/ui_test.py                      # stack on http://localhost:8080
     python scripts/ui_test.py --base-url http://<ip> --shots /tmp/shots
 
-It plays a customer (sign-up, KYC documents, account, QR payment, OTP challenge,
-deposits) and bank staff (document review, cash deposit, fraud desk, DynaStore
+It plays a customer (sign-up, KYC documents, account, PINs, QR payment, a new device
+that needs a code, OTP challenge, deposits, nominees, payees, the lock screen, Block
+everything) and bank staff (document review, cash deposit, fraud desk, DynaStore
 fault injection), on a
 desktop and a phone-sized screen, and fails on any JavaScript error.
 """
@@ -36,6 +37,7 @@ if SHOTS:
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin-dev-pass")
 RUN = int(time.time()) % 10_000_000
 PASSWORD = "ui-test-pass-1"
+PAY_PIN, APP_PIN = "640282", "3917"
 passed = failed = 0
 errors: list[str] = []
 
@@ -49,6 +51,11 @@ def step(name: str, fn) -> None:
     except Exception as e:  # noqa: BLE001 - report and carry on
         failed += 1
         print(f"  FAIL  {name}\n        {str(e).splitlines()[0][:300]}")
+        if SHOTS and "page" in globals():                 # what the customer's screen showed
+            try:
+                globals()["page"].screenshot(path=str(SHOTS / f"FAILED-{failed:02d}.png"))
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def shot(page: Page, name: str) -> None:
@@ -96,8 +103,38 @@ def make_customer_by_api(name: str, n: int) -> dict:
     login = api.post("/api/auth/login", json={"identifier": email, "password": PASSWORD,
                                               "device_fingerprint": f"ui-test-payee-{RUN}"}).json()
     auth = {"Authorization": f"Bearer {login['access_token']}"}
+    for kind, pin in (("payment", PAY_PIN), ("app", APP_PIN)):
+        api.put(f"/api/auth/pins/{kind}", json={"pin": pin, "password": PASSWORD}, headers=auth).raise_for_status()
     account = api.post("/api/accounts", json={"product_type": "SAVINGS"}, headers=auth).json()
     return {"email": email, "auth": auth, **account}
+
+
+def payee_browser(**kw):
+    """A browser the payee has used before: same device id as their API sign-in, so no device code."""
+    ctx = browser.new_context(**kw)
+    ctx.add_init_script(f"localStorage.setItem('ub.device', 'ui-test-payee-{RUN}')")
+    return ctx
+
+
+def enter_pin(p: Page, pin: str, kind: str = "payment") -> None:
+    dialog = p.locator("dialog").filter(has=p.get_by_role("heading", name=f"Enter your {kind} PIN"))
+    expect(dialog).to_be_visible()
+    dialog.locator("input.pin").fill(pin)
+    dialog.get_by_role("button", name="Confirm").click()
+    expect(dialog).to_have_count(0)
+
+
+def inbox_code(p: Page, about: str) -> str:
+    """The code in the newest inbox message containing `about` (it may take a moment to arrive)."""
+    p.get_by_role("link", name="Inbox").click()
+    deadline = time.time() + 10
+    while True:
+        found = p.locator("li[data-type=OTP]").filter(has_text=about)
+        if found.count() or time.time() > deadline:
+            break
+        p.wait_for_timeout(500)
+        p.reload()
+    return re.search(r"\b(\d{6})\b", found.first.inner_text()).group(1)
 
 
 with sync_playwright() as pw:
@@ -148,8 +185,11 @@ with sync_playwright() as pw:
         other.get_by_label("Password").fill("not-the-password")
         other.get_by_role("button", name="Sign in", exact=True).last.click()
         expect(other.get_by_role("alert")).not_to_be_empty()
+        other.get_by_role("button", name="Forgot your password?").click()
+        expect(other.locator("dialog")).to_contain_text("Reset your password")
+        other.locator("dialog").get_by_role("button", name="Cancel").click()
         other.close()
-    step("a wrong password shows an error and stays on the sign-in page", wrong_password)
+    step("a wrong password shows an error and stays on the sign-in page; 'forgot' is offered", wrong_password)
 
     files = Path(os.getenv("TMPDIR", "/tmp")) / f"ui-test-files-{RUN}"
     files.mkdir(parents=True, exist_ok=True)
@@ -265,7 +305,7 @@ with sync_playwright() as pw:
 
     def make_qr():
         # The payee's QR code, drawn by the same app in the payee's own browser session.
-        ctx = browser.new_context()
+        ctx = payee_browser()
         p2 = ctx.new_page()
         watch(p2, "payee")
         p2.goto(BASE + "/")
@@ -289,11 +329,37 @@ with sync_playwright() as pw:
         expect(page.locator("#pay-form input[name=amount]")).to_have_value("250.00")
         expect(page.get_by_text("Paying Ravi K")).to_be_visible()
         page.get_by_role("button", name="Pay", exact=True).click()
+        # First payment ever: the app asks Asha to set a payment PIN, then for it.
+        setup = page.locator("dialog").filter(has=page.get_by_role("heading", name="Set your payment PIN"))
+        expect(setup).to_be_visible()
+        setup.locator("input[name=password]").fill(PASSWORD)
+        setup.locator("input[name=pin]").fill("123456")
+        setup.locator("input[name=again]").fill("123456")
+        setup.get_by_role("button", name="Save PIN").click()
+        expect(setup.get_by_role("alert")).to_contain_text("too easy")                   # refused, dialog stays
+        setup.locator("input[name=pin]").fill(PAY_PIN)
+        setup.locator("input[name=again]").fill(PAY_PIN)
+        shot(page, "05a-set-pin")
+        setup.get_by_role("button", name="Save PIN").click()
+        enter_pin(page, PAY_PIN)
         expect(page.locator("#payment-result .stamp")).to_have_text("Paid")
         expect(page.locator("#payment-result")).to_contain_text("paid by QR")
         expect(page.locator("#payment-result .checks li.pass")).to_have_count(6)
         shot(page, "05-paid")
-    step("scan the QR picture, check the name, pay: stamped Paid with six checks passed", scan_and_pay)
+    step("scan the QR, check the name, set a payment PIN when asked, pay: stamped Paid, six checks passed", scan_and_pay)
+
+    def wrong_pin():
+        page.locator("input[name=payee]").fill(payee["account_number"])
+        page.locator("input[name=payee]").dispatch_event("change")
+        page.locator("#pay-form input[name=amount]").fill("5")
+        page.get_by_role("button", name="Pay", exact=True).click()
+        enter_pin(page, "999999")
+        expect(page.locator("dialog").get_by_role("alert")).to_contain_text("2 tries left")    # asked again
+        shot(page, "05b-wrong-pin")
+        page.locator("dialog").get_by_role("button", name="Cancel").click()
+        expect(page.locator("#pay-form .help.bad").first).to_contain_text("Nothing was done")
+        expect(page.locator("#payment-history li")).to_have_count(1)
+    step("a wrong PIN is asked again with tries left; cancelling pays nothing", wrong_pin)
 
     def bad_payee():
         page.locator("input[name=payee]").fill("500100000000")
@@ -314,23 +380,27 @@ with sync_playwright() as pw:
         laptop.get_by_label("Email or mobile number").fill(phone)          # mobile number works as well as email
         laptop.get_by_label("Password").fill(PASSWORD)
         laptop.get_by_role("button", name="Sign in", exact=True).last.click()
-        expect(laptop.get_by_text("New device")).to_be_visible()
+        expect(laptop.get_by_role("heading", name="Is this you?")).to_be_visible()    # password alone isn't enough
+        shot(laptop, "06a-device-code")
+        laptop.get_by_label("6-digit code").fill(inbox_code(page, "new device"))                   # sent to her known device
+        laptop.get_by_role("button", name="Confirm and sign in").click()
+        expect(laptop.get_by_text("New device confirmed")).to_be_visible()
         expect(laptop.get_by_role("heading", name="Pay", exact=True)).to_be_visible()   # back where the link pointed
+        globals()["laptop_device"] = laptop.evaluate("localStorage.getItem('ub.device')")
         laptop.locator("input[name=payee]").fill(landlord["account_number"])
         laptop.locator("#pay-form input[name=amount]").fill("7000")
         laptop.locator("input[name=note]").fill("rent")
         laptop.get_by_role("button", name="Pay", exact=True).click()
+        enter_pin(laptop, PAY_PIN)
         expect(laptop.locator("#payment-result .stamp")).to_have_text("Confirm it's you")
         shot(laptop, "06-challenge")
         laptop.locator("#payment-result input[name=otp]").fill("000000")
         laptop.get_by_role("button", name="Confirm payment").click()
         expect(laptop.locator("#payment-result form .help.bad")).not_to_be_empty()
-    step("Rs 7,000 to a new payee from a new device asks for a code; a wrong code is refused", challenge)
+    step("a new laptop needs a code to sign in; Rs 7,000 to a new payee from it asks for another; a wrong one is refused", challenge)
 
     def confirm():
-        page.get_by_role("link", name="Inbox").click()     # the code arrives on the customer's own, known device
-        body = page.locator("li[data-type=OTP]").first.inner_text()
-        code = re.search(r"\b(\d{6})\b", body).group(1)
+        code = inbox_code(page, "7,000")                   # the code arrives on the customer's own, known device
         shot(page, "07-inbox")
         laptop.locator("#payment-result input[name=otp]").fill(code)
         laptop.get_by_role("button", name="Confirm payment").click()
@@ -343,6 +413,7 @@ with sync_playwright() as pw:
         page.locator("input[name=payee]").fill(payee["account_number"])
         page.locator("#pay-form input[name=amount]").fill("99000")
         page.get_by_role("button", name="Pay", exact=True).click()
+        enter_pin(page, PAY_PIN)
         expect(page.locator("#payment-result .stamp")).to_have_text("Declined")
         expect(page.locator("#payment-result .checks li.fail")).to_have_count(1)
         expect(page.locator("#payment-result .checks li.fail")).to_contain_text("Your limits")
@@ -354,7 +425,40 @@ with sync_playwright() as pw:
         expect(page.locator(".cover .balance").first).to_have_text("₹42,750.00")
     step("balance is Rs 42,750: exactly the two completed payments left", balance_after)
 
+    def saved_payee():
+        page.get_by_role("link", name="Pay", exact=True).click()
+        page.get_by_role("button", name="Add a payee").click()
+        page.locator("dialog input[name=number]").fill(landlord["account_number"])
+        page.locator("dialog input[name=number]").dispatch_event("change")
+        expect(page.locator("dialog")).to_contain_text("Account holder: Meera S")
+        page.locator("dialog input[name=nickname]").fill("Landlord")
+        page.get_by_role("button", name="Save payee").click()
+        enter_pin(page, PAY_PIN)
+        row = page.locator("#payees li").filter(has_text="Landlord")
+        expect(row).to_contain_text("up to ₹10,000")
+        row.get_by_role("button", name="Pay").click()
+        expect(page.locator("input[name=payee]")).to_have_value(landlord["account_number"])
+        shot(page, "08a-payees")
+    step("saves the landlord as a payee with the payment PIN; it shows its cooling period", saved_payee)
+
     print("\n4. Deposits")
+
+    def set_app_pin():
+        page.get_by_role("link", name="Security", exact=True).click()
+        row = page.locator("[data-pin=APP]")
+        expect(row).to_contain_text("Not set")
+        row.get_by_role("button", name="Set").click()
+        page.locator("dialog input[name=password]").fill(PASSWORD)
+        page.locator("dialog input[name=pin]").fill(PAY_PIN[:4])                      # the start of the payment PIN
+        page.locator("dialog input[name=again]").fill(PAY_PIN[:4])
+        page.get_by_role("button", name="Save PIN").click()
+        expect(page.locator("dialog").get_by_role("alert")).to_contain_text("different")
+        page.locator("dialog input[name=pin]").fill(APP_PIN)
+        page.locator("dialog input[name=again]").fill(APP_PIN)
+        page.get_by_role("button", name="Save PIN").click()
+        expect(row).to_contain_text("Set")
+        expect(page.locator("[data-pin=PAYMENT]")).to_contain_text("Set")
+    step("sets a 4-digit app PIN on the Security page; one that matches the payment PIN is refused", set_app_pin)
 
     def book_fd():
         page.get_by_role("link", name="Deposits", exact=True).click()
@@ -362,6 +466,7 @@ with sync_playwright() as pw:
         page.locator("#deposit-form input[name=amount]").fill("10000")
         expect(page.locator("#quote")).to_contain_text("₹10,000.00")
         page.get_by_role("button", name="Book fixed deposit").click()
+        enter_pin(page, APP_PIN, "app")
         expect(page.locator("[data-deposit]")).to_have_count(1)
         expect(page.locator("[data-deposit]")).to_contain_text("Fixed deposit of ₹10,000.00")
     step("books a Rs 10,000 fixed deposit from a live quote", book_fd)
@@ -371,6 +476,7 @@ with sync_playwright() as pw:
         page.locator("#deposit-form input[name=amount]").fill("2000")
         expect(page.locator("#quote")).to_contain_text("You put in")
         page.get_by_role("button", name="Start recurring deposit").click()
+        enter_pin(page, APP_PIN, "app")
         expect(page.locator("[data-deposit]")).to_have_count(2)
         shot(page, "09-deposits")
     step("starts a Rs 2,000 a month recurring deposit alongside it", book_rd)
@@ -379,15 +485,36 @@ with sync_playwright() as pw:
         page.locator("[data-deposit]").filter(has_text="Fixed deposit").get_by_role("button", name="Close early").click()
         expect(page.locator("dialog")).to_contain_text("Early-closure rate")
         page.locator("dialog button[type=submit]").click()
+        enter_pin(page, APP_PIN, "app")
         expect(page.get_by_text("Deposit closed")).to_be_visible()
         expect(page.locator("[data-deposit]").filter(has_text="Fixed deposit")).to_contain_text("Closed")
     step("early closure shows the reduced payout, then closes", close_fd)
+
+    def nominee():
+        page.locator("[data-deposit]").filter(has_text="Recurring deposit").get_by_role("link", name="Nominees").click()
+        expect(page.get_by_role("heading", name="Nominees")).to_be_visible()
+        page.get_by_role("button", name="Add a nominee").click()
+        page.locator("dialog input[name=full_name]").fill("Kabir Rao")
+        page.locator("dialog select[name=relation]").select_option("CHILD")
+        page.locator("dialog input[name=date_of_birth]").fill("2015-04-02")
+        page.locator("dialog input[name=share_pct]").fill("60")
+        page.get_by_role("button", name="Add nominee").click()
+        enter_pin(page, APP_PIN, "app")
+        expect(page.locator("dialog").get_by_role("alert")).to_contain_text("guardian")    # a child needs one
+        page.locator("dialog input[name=guardian_name]").fill("Asha Rao")
+        page.get_by_role("button", name="Add nominee").click()
+        enter_pin(page, APP_PIN, "app")
+        expect(page.locator("#nominees")).to_contain_text("Kabir Rao")
+        expect(page.locator("main")).to_contain_text("40% isn't given to anyone yet")
+        shot(page, "09a-nominee")
+    step("names a child as nominee for the RD: a guardian is required; shares are tracked", nominee)
 
     print("\n5. Security")
 
     def security():
         page.get_by_role("link", name="Security", exact=True).click()
-        expect(page.get_by_role("heading", name="Devices that have signed in")).to_be_visible()
+        expect(page.get_by_role("heading", name="Devices you've used")).to_be_visible()
+        expect(page.locator("#sessions")).to_contain_text("This device")
         expect(page.locator("main")).to_contain_text("Chrome on")
         expect(page.locator("main table tbody tr").first).to_be_visible()
         shot(page, "11-security")
@@ -397,6 +524,38 @@ with sync_playwright() as pw:
         page.reload()
         expect(page.get_by_role("heading", name="Security")).to_be_visible()
     step("a reload keeps the session", session_survives_reload)
+
+    def lock_screen():
+        page.get_by_role("button", name="Lock now").click()
+        lock = page.locator("dialog.lock")
+        expect(lock).to_be_visible()
+        expect(lock.get_by_role("heading", name="Locked")).to_be_visible()
+        page.keyboard.press("Escape")
+        expect(lock).to_be_visible()                                                   # Escape doesn't get you in
+        shot(page, "11c-locked")
+        lock.locator("input").fill("0000")
+        lock.get_by_role("button", name="Unlock").click()
+        expect(lock.get_by_role("alert")).to_contain_text("tries left")
+        lock.locator("input").fill(APP_PIN)
+        lock.get_by_role("button", name="Unlock").click()
+        expect(lock).to_have_count(0)
+        page.get_by_role("link", name="Accounts", exact=True).click()
+        expect(page.locator("a.cover").first).to_be_visible()
+    step("locks the app; Escape doesn't open it; a wrong PIN is refused, the app PIN unlocks it", lock_screen)
+
+    def locked_elsewhere():
+        # The server locks the session itself (here: as if 5 minutes had passed); the next
+        # click brings up the lock screen, and the page carries on once unlocked.
+        token = page.evaluate("JSON.parse(sessionStorage.getItem('ub.session')).access")
+        api.post("/api/auth/lock", headers={"Authorization": f"Bearer {token}"}).raise_for_status()
+        page.get_by_role("link", name="Pay", exact=True).click()
+        lock = page.locator("dialog.lock")
+        expect(lock).to_be_visible()
+        lock.get_by_role("button", name="Use my password instead").click()
+        lock.locator("input").fill(PASSWORD)
+        lock.get_by_role("button", name="Unlock").click()
+        expect(page.get_by_role("heading", name="Pay", exact=True)).to_be_visible()
+    step("a session locked by the server brings up the lock screen; the password works too", locked_elsewhere)
 
     print("\n5b. Statements")
 
@@ -455,10 +614,16 @@ with sync_playwright() as pw:
     step("fraud desk loads with its counters", fraud_desk)
 
     def takeover_case():
-        # A sign-in from a new device far away, then a payment: the risk engine holds it and a case opens.
+        # A thief with only the password can't sign in on their own device any more:
+        stolen = api.post("/api/auth/login", headers={"X-Sim-Ip": "185.220.101.9", "X-Geo": "55.75,37.61"},
+                          json={"identifier": email, "password": PASSWORD, "device_fingerprint": f"thief-{RUN}"})
+        assert stolen.status_code == 202 and "access_token" not in stolen.json(), stolen.text
+        # So take the harder case: someone with the laptop confirmed today (and the PIN), signing
+        # in from the other side of the world and paying someone new. Held, and a case opens.
         login = api.post("/api/auth/login", headers={"X-Sim-Ip": "185.220.101.9", "X-Geo": "55.75,37.61"},
-                         json={"identifier": email, "password": PASSWORD, "device_fingerprint": f"thief-{RUN}"}).json()
-        auth = {"Authorization": f"Bearer {login['access_token']}", "X-Sim-Ip": "185.220.101.9", "Idempotency-Key": str(uuid.uuid4())}
+                         json={"identifier": email, "password": PASSWORD, "device_fingerprint": laptop_device}).json()
+        auth = {"Authorization": f"Bearer {login['access_token']}", "X-Sim-Ip": "185.220.101.9",
+                "Idempotency-Key": str(uuid.uuid4()), "X-Pin": PAY_PIN}
         accounts = api.get("/api/me/accounts", headers=auth).json()
         src = next(a for a in accounts if a["product_type"] == "SAVINGS")
         thief = make_customer_by_api("Mule Account", 2)
@@ -480,7 +645,7 @@ with sync_playwright() as pw:
             staff.get_by_label("Note for the record").fill("Customer confirmed by phone they did not make this payment.")
             staff.get_by_role("button", name=re.compile("^Fraud")).click()
             expect(staff.locator("main").get_by_text("Resolved").first).to_be_visible()
-    step("a takeover-style payment becomes a case; the analyst confirms fraud", takeover_case)
+    step("a thief with only the password is stopped at sign-in; a far-away payment from a new device becomes a case", takeover_case)
 
     def customer_sees_it():
         page.get_by_role("link", name="Inbox").click()
@@ -532,7 +697,7 @@ with sync_playwright() as pw:
     print("\n7. Phone-sized screen")
 
     def phone_layout():
-        ctx = browser.new_context(**pw.devices["Pixel 7"])
+        ctx = payee_browser(**pw.devices["Pixel 7"])
         m = ctx.new_page()
         watch(m, "phone")
         m.goto(BASE + "/")
@@ -554,6 +719,28 @@ with sync_playwright() as pw:
         expect(m.get_by_role("heading", name="Sign in")).to_be_visible()
         ctx.close()
     step("every customer page fits a phone without sideways scrolling; sign-out works", phone_layout)
+
+    print("\n8. Block everything")
+
+    def block_everything():
+        ctx = payee_browser(viewport={"width": 1280, "height": 900})
+        r = ctx.new_page()
+        watch(r, "ravi")
+        r.goto(BASE + "/")
+        r.get_by_label("Email or mobile number").fill(payee["email"])
+        r.get_by_label("Password").fill(PASSWORD)
+        r.get_by_role("button", name="Sign in", exact=True).last.click()
+        expect(r.get_by_role("heading", name="Namaste, Ravi")).to_be_visible()
+        r.goto(BASE + "/#/security")
+        r.get_by_role("button", name="Block everything").click()
+        r.locator("dialog input[name=sure]").check()
+        shot(r, "26-block-everything")
+        r.locator("dialog").get_by_role("button", name="Block everything").click()
+        expect(r.get_by_text(re.compile("Blocked. 1 account frozen"))).to_be_visible()
+        expect(r.get_by_role("heading", name="Sign in")).to_be_visible()             # signed out here too
+        assert api.get("/api/me", headers=payee["auth"]).status_code == 401           # and everywhere else
+        ctx.close()
+    step("Block everything freezes the account, opens a case and signs out every device", block_everything)
 
     step("no JavaScript errors anywhere", lambda: (_ for _ in ()).throw(AssertionError("; ".join(errors[:5]))) if errors else None)
     browser.close()

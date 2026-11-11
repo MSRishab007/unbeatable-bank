@@ -41,3 +41,9 @@ rules:
   FD_BREAK_AND_FLEE:        { weight: 35 }                        # set by Deposits on early closure
   PATTERN_SIGNAL_SENDER:    { weight: 30 }                        # stream analytics flagged the paying account
   MULE_PAYEE:               { weight: 60 }                        # stream analytics flagged the receiving account
+  # Set by Identity. Never a block on their own: contact or credential changes only count
+  # when paying an untrusted payee.
+  CONTACT_CHANGED:          { weight: 20 }                        # email/phone changed (3 days)
+  CREDENTIAL_RESET:         { weight: 20 }                        # password or PIN reset/changed (1 day)
+  PIN_LOCKED:               { weight: 15 }                        # three wrong PINs (1 day)
+  TOKEN_REUSE:              { weight: 40 }                        # a refresh token was replayed (1 day)

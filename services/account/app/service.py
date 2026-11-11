@@ -25,6 +25,9 @@ from .numbers import PAN_RE, hash_pan, is_valid_account_number, make_account_num
 
 MAX_HOLDERS = 4
 BENEFICIARY_COOLING = timedelta(hours=24)
+LIMIT_RAISE_DELAY = timedelta(hours=24)
+MAX_NOMINEES = 4
+NOMINEE_RELATIONS = ("SPOUSE", "CHILD", "PARENT", "SIBLING", "OTHER")
 
 
 class AccountError(Exception):
@@ -299,7 +302,27 @@ def open_account(
     return get_account(conn, account_id)
 
 
+def _apply_due_limits(conn: psycopg.Connection, account_id: UUID) -> None:
+    """A raised limit whose waiting time is over becomes the limit."""
+    with conn.transaction(), _cur(conn) as cur:
+        cur.execute(
+            """
+            UPDATE account.accounts
+            SET daily_limit = COALESCE(pending_daily_limit, daily_limit),
+                per_txn_limit = COALESCE(pending_per_txn_limit, per_txn_limit),
+                pending_daily_limit = NULL, pending_per_txn_limit = NULL, pending_limits_at = NULL
+            WHERE account_id = %s AND pending_limits_at <= now()
+            RETURNING daily_limit, per_txn_limit
+            """,
+            (account_id,),
+        )
+        row = cur.fetchone()
+        if row:
+            _record_event(cur, account_id, "LIMITS_RAISED", dict(row), "system:account")
+
+
 def get_account(conn: psycopg.Connection, account_id: UUID) -> dict:
+    _apply_due_limits(conn, account_id)
     with _cur(conn) as cur:
         cur.execute("SELECT * FROM account.accounts WHERE account_id = %s", (account_id,))
         account = cur.fetchone()
@@ -367,6 +390,10 @@ def authorize(conn: psycopg.Connection, account_id: UUID, customer_id: UUID, *, 
 
     idle_days is how long the account had been unused (dormant-account fraud signal).
     With touch=True an allowed check also records the activity."""
+    due = conn.execute("SELECT pending_limits_at <= now() FROM account.accounts WHERE account_id = %s",
+                       (account_id,)).fetchone()
+    if due and due[0]:
+        _apply_due_limits(conn, account_id)
     with _cur(conn) as cur:
         cur.execute(
             """
@@ -433,26 +460,55 @@ def precheck_payment(conn: psycopg.Connection, *, customer_id: UUID, from_accoun
 
 def update_limits(conn: psycopg.Connection, account_id: UUID, *, daily_limit: int | None,
                   per_txn_limit: int | None, actor: str) -> dict:
-    """Customers can set their own limits, up to the bank's ceiling."""
+    """Customers set their own limits, up to the bank's ceiling.
+
+    Lowering a limit takes effect at once. Raising one waits LIMIT_RAISE_DELAY (a fresh
+    request replaces anything still waiting), so a takeover can't raise and drain at once."""
     ceiling = 50_000_000  # Rs 5,00,000
     for value in (daily_limit, per_txn_limit):
         if value is not None and not 0 < value <= ceiling:
             raise AccountError("limit must be between 1 paisa and Rs 5,00,000")
+    _apply_due_limits(conn, account_id)
     try:
         with conn.transaction(), _cur(conn) as cur:
-            cur.execute("SELECT 1 FROM account.accounts WHERE account_id = %s FOR UPDATE", (account_id,))
-            if cur.fetchone() is None:
+            cur.execute("SELECT * FROM account.accounts WHERE account_id = %s FOR UPDATE", (account_id,))
+            row = cur.fetchone()
+            if row is None:
                 raise NotFound("account not found")
+            now_values = {"daily_limit": row["daily_limit"], "per_txn_limit": row["per_txn_limit"]}
+            pending = {"daily_limit": row["pending_daily_limit"], "per_txn_limit": row["pending_per_txn_limit"]}
+            applied, waiting = {}, {}
+            for name, value in (("daily_limit", daily_limit), ("per_txn_limit", per_txn_limit)):
+                if value is None:
+                    continue
+                pending[name] = None                       # a new request replaces what was waiting
+                if value <= now_values[name]:
+                    now_values[name] = applied[name] = value
+                else:
+                    pending[name] = waiting[name] = value
+            final_daily = pending["daily_limit"] or now_values["daily_limit"]
+            final_txn = pending["per_txn_limit"] or now_values["per_txn_limit"]
+            if final_txn > final_daily:
+                raise AccountError("per-transaction limit cannot exceed the daily limit")
+            effective_at = (datetime.now(timezone.utc) + LIMIT_RAISE_DELAY
+                            if pending["daily_limit"] or pending["per_txn_limit"] else None)
+            if not waiting and (pending["daily_limit"] or pending["per_txn_limit"]):
+                effective_at = row["pending_limits_at"]   # untouched raise keeps its original time
             cur.execute(
                 """
                 UPDATE account.accounts
-                SET daily_limit = COALESCE(%s, daily_limit), per_txn_limit = COALESCE(%s, per_txn_limit)
+                SET daily_limit = %s, per_txn_limit = %s,
+                    pending_daily_limit = %s, pending_per_txn_limit = %s, pending_limits_at = %s
                 WHERE account_id = %s
                 """,
-                (daily_limit, per_txn_limit, account_id),
+                (now_values["daily_limit"], now_values["per_txn_limit"], pending["daily_limit"],
+                 pending["per_txn_limit"], effective_at, account_id),
             )
-            _record_event(cur, account_id, "LIMITS_CHANGED",
-                          {"daily_limit": daily_limit, "per_txn_limit": per_txn_limit}, actor)
+            _record_event(cur, account_id, "LIMITS_CHANGED", {
+                "applied": applied, "waiting": waiting,
+                "effective_at": effective_at.isoformat() if waiting and effective_at else None,
+                # kept for older readers of the event log
+                "daily_limit": daily_limit, "per_txn_limit": per_txn_limit}, actor)
     except psycopg.errors.CheckViolation as e:
         raise AccountError("per-transaction limit cannot exceed the daily limit") from e
     return get_account(conn, account_id)
@@ -579,6 +635,103 @@ def list_beneficiaries(conn: psycopg.Connection, customer_id: UUID) -> list[dict
             (customer_id,),
         )
         return cur.fetchall()
+
+
+def remove_beneficiary(conn: psycopg.Connection, customer_id: UUID, beneficiary_id: UUID) -> None:
+    with _cur(conn) as cur:
+        cur.execute("UPDATE account.beneficiaries SET removed_at = now() "
+                    "WHERE beneficiary_id = %s AND customer_id = %s AND removed_at IS NULL RETURNING 1",
+                    (beneficiary_id, customer_id))
+        if cur.fetchone() is None:
+            raise NotFound("payee not found")
+
+
+def update_contact(conn: psycopg.Connection, customer_id: UUID, *, email: str | None = None,
+                   phone: str | None = None) -> dict:
+    """Called by Identity once the customer has confirmed the change with a code."""
+    try:
+        with conn.transaction(), _cur(conn) as cur:
+            cur.execute(
+                "UPDATE account.customers SET email = COALESCE(%s, email), phone = COALESCE(%s, phone) "
+                "WHERE customer_id = %s RETURNING *",
+                (email.strip().lower() if email else None, phone, customer_id))
+            row = cur.fetchone()
+    except psycopg.errors.UniqueViolation as e:
+        raise Conflict("another customer already uses that email or phone") from e
+    except psycopg.errors.CheckViolation as e:
+        raise AccountError("invalid email or phone") from e
+    if row is None:
+        raise NotFound("customer not found")
+    return _public_customer(row)
+
+
+# ------------------------------------------------------------------- nominees
+# Who receives the money if the holder dies. Up to four per account (FD and RD accounts
+# included), shares adding up to at most 100%. A minor needs a guardian.
+
+
+def list_nominees(conn: psycopg.Connection, account_id: UUID) -> list[dict]:
+    with _cur(conn) as cur:
+        cur.execute(
+            "SELECT nominee_id, full_name, relation, date_of_birth, guardian_name, share_pct, created_at "
+            "FROM account.nominees WHERE account_id = %s AND removed_at IS NULL ORDER BY created_at",
+            (account_id,))
+        return cur.fetchall()
+
+
+def add_nominee(conn: psycopg.Connection, account_id: UUID, *, full_name: str, relation: str,
+                date_of_birth: date | None, share_pct: float, guardian_name: str | None, actor: str) -> dict:
+    relation = relation.upper()
+    if relation not in NOMINEE_RELATIONS:
+        raise AccountError(f"relation must be one of {', '.join(NOMINEE_RELATIONS)}")
+    if len(full_name.strip()) < 2:
+        raise AccountError("enter the nominee's full name")
+    if date_of_birth is not None:
+        today = date.today()
+        if date_of_birth > today:
+            raise AccountError("date of birth is in the future")
+        age = today.year - date_of_birth.year - ((today.month, today.day) < (date_of_birth.month, date_of_birth.day))
+        if age < 18 and not (guardian_name or "").strip():
+            raise AccountError("a nominee under 18 needs a guardian")
+    with conn.transaction(), _cur(conn) as cur:
+        cur.execute("SELECT status FROM account.accounts WHERE account_id = %s FOR UPDATE", (account_id,))
+        account = cur.fetchone()
+        if account is None:
+            raise NotFound("account not found")
+        if account["status"] == "CLOSED":
+            raise Conflict("account is closed")
+        cur.execute("SELECT count(*) AS n, COALESCE(sum(share_pct), 0) AS total FROM account.nominees "
+                    "WHERE account_id = %s AND removed_at IS NULL", (account_id,))
+        current = cur.fetchone()
+        if current["n"] >= MAX_NOMINEES:
+            raise Conflict(f"an account can have at most {MAX_NOMINEES} nominees")
+        if float(current["total"]) + share_pct > 100:
+            raise AccountError(f"shares would add up to more than 100% "
+                               f"({float(current['total']):g}% is already given)")
+        cur.execute(
+            """
+            INSERT INTO account.nominees
+                (account_id, full_name, relation, date_of_birth, share_pct, guardian_name, added_by)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING nominee_id, full_name, relation, date_of_birth, guardian_name, share_pct, created_at
+            """,
+            (account_id, full_name.strip(), relation, date_of_birth, share_pct,
+             (guardian_name or "").strip() or None, actor),
+        )
+        nominee = cur.fetchone()
+        _record_event(cur, account_id, "NOMINEE_ADDED", {"nominee_id": str(nominee["nominee_id"]),
+                                                         "relation": relation, "share_pct": share_pct}, actor)
+    return nominee
+
+
+def remove_nominee(conn: psycopg.Connection, account_id: UUID, nominee_id: UUID, actor: str) -> None:
+    with conn.transaction(), _cur(conn) as cur:
+        cur.execute("UPDATE account.nominees SET removed_at = now() "
+                    "WHERE nominee_id = %s AND account_id = %s AND removed_at IS NULL RETURNING 1",
+                    (nominee_id, account_id))
+        if cur.fetchone() is None:
+            raise NotFound("nominee not found")
+        _record_event(cur, account_id, "NOMINEE_REMOVED", {"nominee_id": str(nominee_id)}, actor)
 
 
 def create_alias(conn: psycopg.Connection, account_id: UUID, alias: str) -> dict:

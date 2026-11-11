@@ -196,6 +196,17 @@ class Engine:
                 fire(rule_name)
         if "fd_break" in f.signals and not p.payee_trusted:
             fire("FD_BREAK_AND_FLEE", "deposit closed early, then money sent to an untrusted payee")
+        # Account-security events from Identity. A changed email/phone or a reset password is
+        # usually genuine, so it never blocks on its own: it only adds weight when the money is
+        # going somewhere the customer hasn't paid before.
+        if "contact_changed" in f.signals and not p.payee_trusted:
+            fire("CONTACT_CHANGED", "email or phone changed in the last 3 days, paying a new payee")
+        if "credential_reset" in f.signals and not p.payee_trusted:
+            fire("CREDENTIAL_RESET", "password or PIN reset in the last day, paying a new payee")
+        if "pin_locked" in f.signals:
+            fire("PIN_LOCKED", "a PIN was locked after wrong guesses in the last day")
+        if "token_reuse" in f.signals:
+            fire("TOKEN_REUSE", "a copied sign-in token was used in the last day")
 
         score = min(100, sum(h.weight for h in hits if not h.shadow))
         bands = config["bands"]
@@ -254,6 +265,10 @@ class Engine:
             "new_device_login": f"sig:cust:{cust}:new_device_login",
             "impossible_travel": f"sig:cust:{cust}:impossible_travel",
             "fd_break": f"sig:cust:{cust}:fd_break",
+            "contact_changed": f"sig:cust:{cust}:contact_changed",
+            "credential_reset": f"sig:cust:{cust}:credential_reset",
+            "pin_locked": f"sig:cust:{cust}:pin_locked",
+            "token_reuse": f"sig:cust:{cust}:token_reuse",
             "pattern_sender": f"sig:acct:{acct}",
             "mule_payee": f"sig:mule:{p.to_account_id}",
             "deny_acct": f"deny:acct:{acct}",

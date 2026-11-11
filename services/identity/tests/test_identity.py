@@ -15,6 +15,14 @@ def login(conn, deps, user, fingerprint="laptop-fingerprint-1", password=None, *
                          fingerprint=fingerprint, device_label="Chrome on Windows", ip="203.0.113.7", **kw)
 
 
+def login_new_device(conn, deps, user, fingerprint="phone-fingerprint-2", **kw):
+    """A login from a device the customer hasn't confirmed: password, then the code we send."""
+    challenge = login(conn, deps, user, fingerprint=fingerprint, **kw)
+    assert challenge["otp_required"] and "access_token" not in challenge
+    return service.verify_login(conn, deps, challenge_id=challenge["challenge_id"],
+                                code=code_from_inbox(deps, user), ip="203.0.113.7")
+
+
 def inbox(deps, user):
     return deps.docstore.query("notifications", {"customer_id": str(user["customer_id"])})
 
@@ -95,14 +103,30 @@ def test_login_rate_limit_hook(conn, deps, user):
 def test_refresh_and_logout(conn, deps, user):
     out = login(conn, deps, user)
     refreshed = service.refresh(deps, out["refresh_token"])
+    assert refreshed["refresh_token"] != out["refresh_token"]          # rotated on every use
     sid = verify_token(refreshed["access_token"], "test-secret")["sid"]
     assert service.session_is_active(deps, sid)
     with pytest.raises(service.InvalidCredentials):
-        service.refresh(deps, out["refresh_token"] + "x")
+        service.refresh(deps, refreshed["refresh_token"] + "x")
+    again = service.refresh(deps, refreshed["refresh_token"])
     service.logout(deps, user["customer_id"], sid)
     assert not service.session_is_active(deps, sid)
+    assert service.check_session(deps, sid)["state"] == "ENDED"
     with pytest.raises(service.InvalidCredentials):
-        service.refresh(deps, out["refresh_token"])
+        service.refresh(deps, again["refresh_token"])
+
+
+def test_reusing_an_old_refresh_token_ends_the_session(conn, deps, user):
+    out = login(conn, deps, user)
+    thief = service.refresh(deps, out["refresh_token"])               # someone copied the token and used it
+    with pytest.raises(service.InvalidCredentials):
+        service.refresh(deps, out["refresh_token"])                   # the real app then tries the old one
+    with pytest.raises(service.InvalidCredentials):
+        service.refresh(deps, thief["refresh_token"])                 # and the thief's copy is dead too
+    sid = verify_token(thief["access_token"], "test-secret")["sid"]
+    assert service.check_session(deps, sid)["state"] == "ENDED"
+    assert f"sig:cust:{user['customer_id']}:token_reuse" in deps.signals.keys
+    assert "We signed you out" in [n["title"] for n in inbox(deps, user)]
 
 
 def test_session_expires(conn, deps, user):
@@ -120,11 +144,12 @@ def test_new_device_is_flagged_and_customer_is_told(conn, deps, user):
     signup_device_seen = deps.signals.keys[f"seen:dev:{user['customer_id']}:{first['device_id']}"]
     assert deps.clock.now - signup_device_seen > 86400          # sign-up device is trusted from the start
     deps.clock.now += 3600
-    second = login(conn, deps, user, fingerprint="phone-fingerprint-2")
+    second = login_new_device(conn, deps, user)
     assert second["new_device"] and second["device_id"] != first["device_id"]
     assert f"sig:cust:{user['customer_id']}:new_device_login" in deps.signals.keys
     assert deps.signals.keys[f"seen:dev:{user['customer_id']}:{second['device_id']}"] == deps.clock.now
-    assert [n["title"] for n in inbox(deps, user)] == ["New device signed in"]
+    assert [n["title"] for n in inbox(deps, user)] == ["Confirmation code", "New device signed in"]
+    assert login(conn, deps, user, fingerprint="phone-fingerprint-2")["access_token"]   # trusted from now on
     event = conn.execute("SELECT payload FROM identity.outbox WHERE event_type = 'LoginSucceeded' "
                          "AND payload->>'device_id' = %s", (second["device_id"],)).fetchone()[0]
     assert event["new_device"] is True
@@ -133,14 +158,14 @@ def test_new_device_is_flagged_and_customer_is_told(conn, deps, user):
 
 def test_revoke_device_ends_its_sessions(conn, deps, user):
     laptop = login(conn, deps, user)
-    phone = login(conn, deps, user, fingerprint="phone-fingerprint-2")
+    phone = login_new_device(conn, deps, user)
     result = service.revoke_device(conn, deps, user["customer_id"], uuid.UUID(phone["device_id"]))
     assert result["sessions_ended"] == 1
     with pytest.raises(service.InvalidCredentials):
         service.refresh(deps, phone["refresh_token"])
     assert service.refresh(deps, laptop["refresh_token"])["access_token"]   # other device unaffected
     assert len(service.list_devices(conn, user["customer_id"])) == 1
-    assert login(conn, deps, user, fingerprint="phone-fingerprint-2")["new_device"]   # must earn trust again
+    assert login(conn, deps, user, fingerprint="phone-fingerprint-2")["otp_required"]   # must earn trust again
     with pytest.raises(service.NotFound):
         service.revoke_device(conn, deps, uuid.uuid4(), uuid.UUID(laptop["device_id"]))   # someone else
 

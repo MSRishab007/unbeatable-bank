@@ -118,6 +118,19 @@ class BeneficiaryIn(BaseModel):
     nickname: str | None = None
 
 
+class NomineeIn(BaseModel):
+    full_name: str = Field(..., min_length=2, max_length=120)
+    relation: str
+    date_of_birth: date | None = None
+    share_pct: float = Field(..., gt=0, le=100)
+    guardian_name: str | None = Field(None, max_length=120)
+
+
+class ContactIn(BaseModel):
+    email: EmailStr | None = None
+    phone: str | None = None
+
+
 class AliasIn(BaseModel):
     alias: str
 
@@ -162,6 +175,31 @@ def customer_accounts(customer_id: UUID, conn=Depends(get_conn)):
 @app.post("/v1/customers/{customer_id}/beneficiaries", status_code=201)
 def add_beneficiary(customer_id: UUID, body: BeneficiaryIn, conn=Depends(get_conn)):
     return service.add_beneficiary(conn, customer_id, **body.model_dump())
+
+
+@app.delete("/v1/customers/{customer_id}/beneficiaries/{beneficiary_id}", status_code=204)
+def remove_beneficiary(customer_id: UUID, beneficiary_id: UUID, conn=Depends(get_conn)):
+    service.remove_beneficiary(conn, customer_id, beneficiary_id)
+
+
+@app.patch("/internal/v1/customers/{customer_id}/contact")
+def update_contact(customer_id: UUID, body: ContactIn, conn=Depends(get_conn)):
+    return service.update_contact(conn, customer_id, email=body.email, phone=body.phone)
+
+
+@app.get("/v1/accounts/{account_id}/nominees")
+def nominees(account_id: UUID, conn=Depends(get_conn)):
+    return service.list_nominees(conn, account_id)
+
+
+@app.post("/v1/accounts/{account_id}/nominees", status_code=201)
+def add_nominee(account_id: UUID, body: NomineeIn, conn=Depends(get_conn), actor=Depends(get_actor)):
+    return service.add_nominee(conn, account_id, actor=actor, **body.model_dump())
+
+
+@app.delete("/v1/accounts/{account_id}/nominees/{nominee_id}", status_code=204)
+def remove_nominee(account_id: UUID, nominee_id: UUID, conn=Depends(get_conn), actor=Depends(get_actor)):
+    service.remove_nominee(conn, account_id, nominee_id, actor)
 
 
 @app.get("/v1/customers/{customer_id}/beneficiaries")

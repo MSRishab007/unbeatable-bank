@@ -19,9 +19,32 @@ class Upstreams:
 
     def __init__(self):
         self.calls = []
+        self.sessions = {}                                   # sid -> state; ACTIVE when not listed
+        self.pins = {"PAYMENT": "583921", "APP": "4826"}     # Riya's PINs; None = not set
+        self.pin_locked = set()
+        self.identity_down = False
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         service = request.url.host
+        if service == "identity" and self.identity_down:
+            raise httpx.ConnectError("identity is down")
+        if service == "identity" and request.url.path.startswith("/internal/v1/sessions/"):
+            sid = request.url.path.split("/")[4]
+            self.calls.append({"service": "identity-session", "sid": sid, "query": dict(request.url.params)})
+            return httpx.Response(200, json={"state": self.sessions.get(sid, "ACTIVE")})
+        if service == "identity" and request.url.path == "/internal/v1/pins/verify":
+            body = json.loads(request.content)
+            self.calls.append({"service": "identity-pin", **body})
+            expected = self.pins.get(body["kind"])
+            if expected is None:
+                return httpx.Response(200, json={"result": "NOT_SET"})
+            if body["kind"] in self.pin_locked:
+                return httpx.Response(200, json={"result": "LOCKED", "locked_until": "2026-11-12T10:00:00+00:00"})
+            if not body["pin"]:
+                return httpx.Response(200, json={"result": "REQUIRED"})
+            if body["pin"] == expected:
+                return httpx.Response(200, json={"result": "OK"})
+            return httpx.Response(200, json={"result": "WRONG", "attempts_left": 2})
         self.calls.append({"service": service, "method": request.method, "path": request.url.path,
                            "query": dict(request.url.params), "headers": dict(request.headers),
                            "body": request.content})
@@ -37,12 +60,18 @@ class Upstreams:
                 "Content-Type": "application/pdf", "Content-Disposition": 'inline; filename="pan.pdf"',
                 "Content-Security-Policy": "sandbox; default-src 'none'", "Cache-Control": "no-store",
                 "Set-Cookie": "leak=1", "X-Internal-Debug": "secret"})
+        if service == "identity" and request.url.path.endswith("/lockdown"):
+            return httpx.Response(200, json={"sessions_ended": 2})
+        if service == "fraud" and request.url.path == "/v1/lockdown":
+            return httpx.Response(201, json={"case_number": "CASE-1001"})
         if service == "intake" and request.url.path == "/v1/payments" and request.method == "POST":
             return httpx.Response(422, json={"status": "DECLINED", "decline_code": "INSUFFICIENT_FUNDS"})
         return httpx.Response(200, json={"ok": True, "service": service, "path": request.url.path})
 
     def last(self, service=None):
-        return [c for c in self.calls if service in (None, c["service"])][-1]
+        """The last request forwarded (session and PIN checks are left out unless asked for)."""
+        return [c for c in self.calls if service == c["service"]
+                or (service is None and not c["service"].startswith("identity-"))][-1]
 
 
 @pytest.fixture
@@ -67,7 +96,8 @@ def customer(sub=RIYA, **claims):
 
 
 def staff(role):
-    token = issue_token(subject="asha", role="staff", secret=SECRET, ttl_seconds=60, staff_role=role)
+    token = issue_token(subject="asha", role="staff", secret=SECRET, ttl_seconds=60, staff_role=role,
+                        sid="staff-session-1")
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -130,7 +160,7 @@ def test_staff_routes_check_roles(client, up):
 
 
 def test_payment_forwarding_keeps_status_body_and_idempotency_key(client, up):
-    r = client.post("/api/payments", headers={**customer(), "Idempotency-Key": "abc-123",
+    r = client.post("/api/payments", headers={**customer(), "Idempotency-Key": "abc-123", "X-Pin": "583921",
                                               "X-Forwarded-For": "198.51.100.4, 10.0.0.1"},
                     json={"from_account_id": RIYA_ACCOUNT, "payee": "500100000016", "amount": 100})
     assert r.status_code == 422 and r.json()["decline_code"] == "INSUFFICIENT_FUNDS"
@@ -138,6 +168,7 @@ def test_payment_forwarding_keeps_status_body_and_idempotency_key(client, up):
     assert call["headers"]["idempotency-key"] == "abc-123"
     assert call["headers"]["x-client-ip"] == "198.51.100.4"
     assert json.loads(call["body"])["amount"] == 100
+    assert "x-pin" not in call["headers"]                             # the PIN stops at the gateway
 
 
 def test_query_string_and_path_parameters_are_forwarded(client, up):
@@ -229,7 +260,8 @@ def test_oversized_requests_are_refused_before_reaching_a_service(client, up, mo
             yield b"x" * 100
 
     r = client.post("/api/kyc/documents?doc_type=PAN", content=chunks(), headers=customer())
-    assert r.status_code == 413 and len(up.calls) == before
+    forwarded = [c for c in up.calls[before:] if not c["service"].startswith("identity-")]
+    assert r.status_code == 413 and forwarded == []
     assert client.post("/api/kyc/documents?doc_type=PAN", content=b"x" * 1000, headers=customer()).status_code == 200
 
 
@@ -272,3 +304,107 @@ def test_public_statement_check_is_rate_limited_per_address(client, up, monkeypa
     assert blocked.json()["error"] == "TOO_MANY_REQUESTS" and int(blocked.headers["retry-after"]) >= 1
     assert client.post("/api/statements/verify", content=b"%PDF-x", headers=other).status_code == 200   # someone else is fine
     assert len([c for c in up.calls if c["path"] == "/v1/statements/verify-file"]) == 11
+
+
+# ------------------------------------------------------------------ sessions and PINs
+
+
+def test_ended_and_locked_sessions_are_refused(client, up):
+    up.sessions["session-1"] = "ENDED"
+    r = client.get("/api/me", headers=customer())
+    assert r.status_code == 401 and r.json()["error"] == "SESSION_ENDED"
+    up.sessions["session-1"] = "LOCKED"
+    r = client.get("/api/me", headers=customer())
+    assert r.status_code == 423 and r.json()["error"] == "SESSION_LOCKED"
+    assert client.get("/api/me/accounts", headers=customer()).status_code == 423      # composed endpoints too
+    assert client.post("/api/auth/unlock", headers=customer(), json={"pin": "4826"}).status_code == 200
+    assert up.last()["path"] == "/v1/auth/unlock"                                     # unlock gets through
+    assert client.post("/api/auth/logout", headers=customer()).status_code == 200
+    assert not [c for c in up.calls if c["service"] == "account"]                    # nothing else did
+
+
+def test_tokens_without_a_session_are_refused(client, up):
+    old = issue_token(subject=RIYA, role="customer", secret=SECRET, ttl_seconds=60)
+    r = client.get("/api/me", headers={"Authorization": f"Bearer {old}"})
+    assert r.status_code == 401 and r.json()["error"] == "SESSION_ENDED"
+
+
+def test_staff_sessions_are_checked_too(client, up):
+    up.sessions["staff-session-1"] = "ENDED"
+    assert client.get("/api/staff/cases", headers=staff("ANALYST")).status_code == 401
+
+
+def test_background_requests_do_not_count_as_activity(client, up):
+    client.get("/api/notifications", headers={**customer(), "X-Background": "1"})
+    assert [c["query"] for c in up.calls if c["service"] == "identity-session"] == [{"activity": "false"}]
+    client.get("/api/notifications", headers={**customer(), "X-Background": "1"})    # not cached: asks again
+    client.get("/api/notifications", headers=customer())
+    client.get("/api/me", headers=customer())                                         # cached for a few seconds
+    checks = [c["query"]["activity"] for c in up.calls if c["service"] == "identity-session"]
+    assert checks == ["false", "false", "true"]
+
+
+def test_ending_a_session_takes_effect_at_once_on_this_pod(client, up):
+    assert client.get("/api/me", headers=customer()).status_code == 200              # now cached as ACTIVE
+    client.post("/api/auth/logout", headers=customer())
+    up.sessions["session-1"] = "ENDED"
+    assert client.get("/api/me", headers=customer()).status_code == 401
+
+
+def test_session_check_fails_closed(client, up):
+    up.identity_down = True
+    r = client.get("/api/me", headers=customer())
+    assert r.status_code == 503 and not [c for c in up.calls if c["service"] == "account"]
+
+
+def test_routes_that_move_money_need_the_payment_pin(client, up):
+    pay = {"from_account_id": RIYA_ACCOUNT, "payee": "500100000016", "amount": 100}
+    r = client.post("/api/payments", headers=customer(), json=pay)
+    assert r.status_code == 428 and r.json()["details"] == {"kind": "PAYMENT"}
+    r = client.post("/api/payments", headers={**customer(), "X-Pin": "4826"}, json=pay)   # the app PIN won't do
+    assert r.status_code == 403 and r.json()["error"] == "PIN_WRONG" and r.json()["details"]["attempts_left"] == 2
+    assert not [c for c in up.calls if c["service"] == "intake"]
+    up.pin_locked.add("PAYMENT")
+    r = client.post("/api/payments", headers={**customer(), "X-Pin": "583921"}, json=pay)
+    assert r.status_code == 423 and r.json()["error"] == "PIN_LOCKED"
+    up.pin_locked.clear()
+    up.pins["PAYMENT"] = None
+    r = client.post("/api/payments", headers={**customer(), "X-Pin": "583921"}, json=pay)
+    assert r.status_code == 428 and r.json()["error"] == "PIN_NOT_SET"
+    up.pins["PAYMENT"] = "583921"
+    for method, path in (("POST", "/api/me/beneficiaries"), ("PATCH", f"/api/accounts/{RIYA_ACCOUNT}/limits"),
+                         ("POST", f"/api/accounts/{RIYA_ACCOUNT}/holders")):
+        assert client.request(method, path, headers=customer(), json={}).status_code == 428, path
+        assert client.request(method, path, headers={**customer(), "X-Pin": "583921"}, json={}).status_code == 200
+
+
+def test_deposits_and_nominees_need_the_app_pin(client, up):
+    for method, path in (("POST", "/api/deposits/fd"), ("POST", "/api/deposits/rd"),
+                         ("POST", f"/api/deposits/{uuid.uuid4()}/close"),
+                         ("POST", f"/api/accounts/{RIYA_ACCOUNT}/nominees"),
+                         ("DELETE", f"/api/accounts/{RIYA_ACCOUNT}/nominees/{uuid.uuid4()}")):
+        r = client.request(method, path, headers=customer(), json={})
+        assert r.status_code == 428 and r.json()["details"]["kind"] == "APP", path
+        assert client.request(method, path, headers={**customer(), "X-Pin": "4826"}, json={}).status_code == 200
+    assert client.get(f"/api/accounts/{RIYA_ACCOUNT}/nominees", headers=customer()).status_code == 200   # reading: no PIN
+    assert client.post(f"/api/accounts/{RIYA_ACCOUNT}/nominees", headers={**customer(ARJUN), "X-Pin": "4826"},
+                       json={}).status_code == 404                                    # not his account
+
+
+def test_the_pin_is_checked_only_after_ownership(client, up):
+    client.post(f"/api/accounts/{RIYA_ACCOUNT}/nominees", headers={**customer(ARJUN), "X-Pin": "0000"}, json={})
+    assert not [c for c in up.calls if c["service"] == "identity-pin"]               # no PIN guessing on others
+
+
+def test_block_everything_freezes_ends_and_reports(client, up):
+    up.sessions["session-1"] = "LOCKED"                                                # works even when locked
+    r = client.post("/api/me/lockdown", headers=customer())
+    assert r.status_code == 200
+    paths = [(c["service"], c["path"]) for c in up.calls if not c["service"].startswith("identity-")]
+    assert ("account", f"/v1/accounts/{RIYA_ACCOUNT}/freeze") in paths
+    assert ("fraud", "/v1/lockdown") in paths
+    assert ("identity", f"/internal/v1/customers/{RIYA}/lockdown") in paths
+    freeze = [c for c in up.calls if c.get("path", "").endswith("/freeze")][0]
+    assert freeze["headers"]["x-actor"] == f"customer:{RIYA}"
+    assert r.json() == {"accounts_frozen": [RIYA_ACCOUNT], "accounts_failed": [], "sessions_ended": 2,
+                        "case_number": "CASE-1001"}

@@ -16,6 +16,22 @@ differently from the notes below, on purpose: a rejected KYC file is deleted at 
 instead of after 30 days, and a monthly statement is built the first time it is
 asked for instead of for every account at month end (see docs/design.md).
 
+**Deployed on GCP (11 Nov):** project `unbeatable-bank-17`, everything except Flink is
+running and `make smoke` passes there, including Kafka.
+
+**Next on GCP: test Flink (requirement e).** It has only run locally so far.
+
+1. `make flink-up` (about 10 minutes; Dataproc adds about $0.20/hour while it runs).
+   On the free-trial billing account it may hit a CPU quota: then switch
+   `active_billing` to a USD account first.
+2. About 5 minutes later: `python loadtest/simulator.py http://<bank IP> --with-flink`
+3. Results on the output topic:
+   `kubectl -n kafka exec bank-kafka-combined-0 -- /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic analytics-results --from-beginning --max-messages 5 --timeout-ms 180000`
+   and the System page's "Stream analytics" fills in.
+4. If nothing arrives: the job log is `/var/log/audit-analytics.log` on the Dataproc
+   master (`gcloud compute ssh <cluster>-m --zone us-central1-a`).
+5. `make flink-down` afterwards to stop only Flink (`make down` also stops it).
+
 **Still open:** item 2 (local Prometheus and Grafana, request IDs), item 5 (ML
 anomaly score), item 6 (mule-account recovery), Tier 2, and the rest of Tier 3.
 
@@ -174,6 +190,142 @@ on the accounts page.
 Bootstrap Terraform, `make up`, GitHub repository variables, release workflow,
 ArgoCD sync, Flink on Dataproc, `make smoke`, `make ui-test`, `make simulate`,
 `make loadtest` (watch HPAs), Grafana screenshots, `make down`.
+
+## Feature backlog (agreed 11 Nov): build all of this, then polish the UI
+
+The bank works end to end but is basic. Everything below is built and tested first;
+the UI redesign (modern, animated) comes last, once the features are settled.
+Each item gets unit tests, smoke-test checks and browser-test steps like the rest.
+
+### A. Security a real bank would not launch without — DONE (11 Nov)
+
+Built, with unit tests, smoke-test section 1c/4/8c and browser-test steps. As built:
+
+A1. **Two PINs.** Payment PIN (6 digits): payments, adding a payee, raising a limit,
+adding a joint holder. App PIN (4 digits): open/close FD and RD, nominees, unlocking
+the app. The app PIN may not be the first or last four digits of the payment PIN;
+trivial PINs (111111, 123456) are refused. The gateway checks the `X-Pin` header with
+Identity before forwarding (the PIN never reaches the service doing the work). Stored
+as HMAC-SHA256 with a per-row salt and a server-side pepper (`PIN_PEPPER`): a PIN has
+too few values for a slow hash to help; the 3-tries lock is what protects it.
+3 wrong: locked 24 h, customer told, `pin_locked` risk signal. Forgot/locked: password
++ code (email and inbox), then a `credential_reset` risk signal for a day. Set on first
+use (the app asks) or on the Security page; change with the current PIN.
+
+A2. **Sessions.** Every signed-in request is checked with Identity (`ACTIVE`, `LOCKED`,
+`ENDED`); the gateway reuses an ACTIVE answer for 5 s, and forgets it at once on the
+pod that ended it. Customer sessions **lock after 5 minutes idle** (423) and unlock
+with the app PIN or password, carrying on where they were; the app also shows the
+lock screen after 5 minutes without input, and has a Lock button. Background polling
+(`X-Background: 1`) neither keeps a session awake nor triggers the lock screen.
+Refresh tokens rotate; a reused one ends the session (and raises `token_reuse`).
+Staff have revocable sessions that end after 15 minutes idle, and a logout.
+
+A3. **Passwords:** change (current password; every other session ends); forgot (code
+by email + date of birth; every session ends; a wrong date of birth uses up the code).
+
+A4. **New-device sign-in needs a code** (email + inbox of the customer's other
+devices). The sign-up device is trusted; removing a device makes it earn trust again.
+
+A5. **Email/phone change:** password + a code to the *current* email/app; the old
+address is told. Payments are **not** blocked afterwards (agreed): a 3-day
+`contact_changed` signal adds weight only when paying an untrusted payee.
+
+A6. **Block everything:** freezes every account, ends every session, opens a HIGH
+ACCOUNT_TAKEOVER case. Works while the app is locked, needs no PIN.
+
+A7. **Limits:** lowering applies at once; raising needs the payment PIN and takes
+effect 24 hours later (a new request replaces a waiting raise).
+
+Also done from later sections: **B1** (saved payees: add with PIN, nickname, 24-hour
+cooling shown, remove), **C1** (app PIN for deposits), **C3** (nominees for accounts
+and deposits: up to four, shares to 100%, guardian for a minor, app PIN), and the
+D4 rules for PIN locks, credential resets and contact changes.
+
+### B. Payments
+
+B1. **Beneficiaries:** save payees with a nickname (PIN to add), first 24 hours at a
+lower limit (exists as a rule today; make it visible), remove, list.
+B2. **Request money (collect request):** ask someone to pay you; they approve with
+their PIN or decline. Risk rule for the "you'll receive money, enter your PIN" scam:
+first-time collect requests show a clear warning.
+B3. **Scheduled and recurring payments** (standing instructions) run by the end-of-day
+batch through the normal pipeline; paused after 3 failures.
+B4. **Payment receipt** as a PDF for any completed payment.
+B5. **Passbook search and filters** (dates, amount, type) and CSV export.
+B6. **Bulk payments from a CSV** for current accounts, rows through a Kafka queue,
+each row still risk-checked; result file to download.
+B7. **Disputes:** customer disputes a completed payment; case; if fraud is confirmed,
+a lien on the receiving (mule) account and a reversal approved by two analysts.
+
+### C. Deposits and accounts
+
+C1. **PIN to open, close or break an FD/RD** (with A1).
+C2. **FD at maturity:** choose payout or auto-renew (principal, or principal +
+interest) when booking; the end-of-day batch renews at the then-current rate.
+C3. **Nominee** for accounts and deposits (name, relation, share), PIN to change.
+C4. **Sweep-in FD:** savings above a chosen amount move into an FD automatically and
+come back when the balance runs short (shows the ledger's holds and journals).
+C5. **TDS on FD interest** (10% above the yearly threshold, Form 15G/15H to waive) and
+a yearly interest certificate PDF.
+C6. **Joint accounts "jointly" mode:** both holders approve each payment (today
+either holder can pay alone).
+C7. **Overdraft for current accounts:** customer applies, staff approve
+(maker-checker), interest on the used amount at end of day.
+C8. **Close an account:** balance to another account, deposits closed or kept, a final
+statement, then the account number is retired.
+C9. **Minimum balance and charges** (optional; shows charges as ledger journals).
+
+### D. Fraud and risk (the project's emphasis)
+
+D1. **ML anomaly score** in shadow mode, then on (Tier 1 item 5 above).
+D2. **Mule recovery** with liens (with B7).
+D3. **Money-flow graph** for analysts (Tier 2 item 9).
+D4. **New fraud rules:** PIN failures, SIM swap (A5), collect-request scam (B2),
+dormant account suddenly active, many new beneficiaries in a day, payment right after
+a password or PIN reset.
+D5. **Case work:** assign cases to analysts, a due time by severity, notes, escalation;
+"my cases" view.
+D6. **Customer-facing fraud explanations:** why a payment was held, in plain words.
+
+### E. Notifications and the customer
+
+E1. **OTPs and alerts over free channels**, all sent by the Notification Cloud Function:
+- Email through Brevo (already wired; free plan about 300 emails/day, no card). Needs
+  an API key in Secret Manager and a verified sender address.
+- RCS through a Google RCS Business Messaging *test* agent: messages to registered
+  test devices are not charged, and an unlaunched agent can only message those
+  devices (each must accept an invite; 200 invites in total). Enough for the team's
+  and the examiners' phones; a public launch would need brand verification and is paid.
+- In-app inbox stays the fallback that always works. Plain SMS stays simulated (needs
+  paid DLT registration in India).
+E2. Notification preferences (what by email, what in-app only).
+E3. Profile: change address, download all my data.
+
+### F. Staff and operations
+
+F1. Audit log viewer for every staff action.
+F2. Maker-checker for limit raises, overdrafts and reversals (as for unfreeze today).
+F3. End-of-day report viewer (the reports already go to Cloud Storage).
+
+### G. Cloud requirements still to demonstrate on GCP
+
+G1. Flink on Dataproc (see "Next on GCP" above).
+G2. Load test on GKE showing the autoscalers scale out (requirement c).
+G3. Local Prometheus + Grafana, alert rules, request IDs (Tier 1 item 2).
+G4. Fixed address for the demo (static IP, optional domain and https).
+G5. Security scans in CI (gitleaks, pip-audit, Trivy).
+
+### H. Last: UI redesign
+
+A complete visual redesign (modern, sleek, with purposeful animation) of the
+customer app and staff console, once A to F are done. Same pages and API; new look,
+motion, and mobile-first layouts.
+
+### Suggested order
+
+A, B1, C1 and C3 are done. Next: B2-B4, C2, the rest of D4, D5-D6, then G1-G2 on GCP, then B5-B7, C4-C9, D1-D3, E, F, G3-G5,
+and H last.
 
 ## Not planned
 

@@ -57,8 +57,12 @@ resource "helm_release" "argocd" {
   create_namespace = true
   repository       = "https://argoproj.github.io/argo-helm"
   chart            = "argo-cd"
-  version          = "~7.7.0"
-  timeout          = 600
+  # Argo CD 3.5 (chart 10.11.x). Argo CD diffs with a built-in copy of the Kubernetes
+  # schema; 2.13 (chart 7.7) knew Kubernetes 1.31 and failed on fields GKE's newer
+  # Kubernetes adds ("terminatingReplicas: field not declared in schema"). Keep this
+  # at or above the cluster's Kubernetes version when GKE upgrades it.
+  version = "~10.11.0"
+  timeout = 600
 
   values = [yamlencode({
     dex           = { enabled = false }
@@ -81,7 +85,7 @@ resource "helm_release" "root_app" {
   namespace  = "argocd"
   repository = "https://argoproj.github.io/argo-helm"
   chart      = "argocd-apps"
-  version    = "~2.0.0"
+  version    = "~2.0.8"
 
   values = [yamlencode({
     applications = {

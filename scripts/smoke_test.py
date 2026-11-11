@@ -7,7 +7,8 @@ Works against docker compose, scripts/dev_stack.py or the GKE deployment:
     python scripts/smoke_test.py http://<public-ip>    # deployed system
 
 Staff logins default to the development ones; override with ADMIN_PASSWORD,
-ANALYST_PASSWORD when testing a real deployment. Exits 1 if any check fails.
+ANALYST_PASSWORD and ANALYST2_PASSWORD when testing a real deployment (`make smoke`
+reads them from infra/main/terraform.tfvars). Exits 1 if any check fails.
 Use --skip-eod to leave the bank's calendar alone (fast-forward moves it ~3 months).
 """
 
@@ -103,7 +104,7 @@ def otp_for(c: dict, txn_id: str) -> str | None:
 print(f"Unbeatable Bank smoke test against {BASE}\n")
 ADMIN = staff("admin", os.getenv("ADMIN_PASSWORD", "admin-dev-pass"))
 ANALYST1 = staff("analyst1", os.getenv("ANALYST_PASSWORD", "analyst-dev-pass"))
-ANALYST2 = staff("analyst2", os.getenv("ANALYST_PASSWORD", "analyst-dev-pass"))
+ANALYST2 = staff("analyst2", os.getenv("ANALYST2_PASSWORD") or os.getenv("ANALYST_PASSWORD", "analyst-dev-pass"))
 
 # ---------------------------------------------------------------------------------------------
 print("1. Sign-up, KYC, accounts (Identity -> Account -> Ledger)")

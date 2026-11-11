@@ -15,6 +15,16 @@ TF_MAIN      = terraform -chdir=infra/main
 TF_PLATFORM  = terraform -chdir=infra/platform
 GATEWAY_IP   = $(shell kubectl -n bank get service gateway-public -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
 
+# Staff passwords for the test commands, read from staff_bootstrap in infra/main/terraform.tfvars
+# (id:ROLE:password,...), so nobody has to type or paste them. Set a variable to override.
+STAFF_LINE   = $(shell sed -n 's/^staff_bootstrap *= *"\(.*\)"/\1/p' infra/main/terraform.tfvars 2>/dev/null)
+staff_pw     = $(shell echo '$(STAFF_LINE)' | tr ',' '\n' | sed -n 's/^$(1):[A-Z]*://p')
+export ADMIN_PASSWORD    ?= $(call staff_pw,admin)
+export ANALYST_PASSWORD  ?= $(call staff_pw,analyst1)
+export ANALYST2_PASSWORD ?= $(call staff_pw,analyst2)
+export TELLER_PASSWORD   ?= $(call staff_pw,teller1)
+export KYC_PASSWORD      ?= $(call staff_pw,kyc1)
+
 .PHONY: help init up down flink-up flink-down kubeconfig url status argocd grafana smoke ui-test loadtest simulate logs destroy check-project
 
 help:
@@ -61,7 +71,7 @@ argocd: ## open the ArgoCD UI on http://localhost:8081 (user: admin)
 grafana: ## open Grafana on http://localhost:3000 (admin / unbeatable)
 	kubectl -n monitoring port-forward service/monitoring-grafana 3000:80
 
-smoke: ## end-to-end check against the deployed system (set ADMIN_PASSWORD / ANALYST_PASSWORD)
+smoke: ## end-to-end check against the deployed system (staff passwords come from infra/main/terraform.tfvars)
 	python scripts/smoke_test.py http://$(GATEWAY_IP) --skip-eod
 
 ui-test: ## browser test of the web app against the deployed system (needs playwright)

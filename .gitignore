@@ -32,7 +32,8 @@ vendor/
 .dev/
 .build/
 
-
+# Personal notes with passwords or account IDs: keep them outside the repository folder.
+# These names are blocked in case one ends up here anyway. The repository is public.
 variables.txt
 notes*.txt
 *.secret

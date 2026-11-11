@@ -345,6 +345,10 @@ cannot run anything in the bank's origin.
 - Least privilege: one database user per service, Workload Identity only where needed,
   non-root containers, NetworkPolicy around internal services. Identity has its own
   Google service account; no other service can read the KYC bucket.
+- The only thing exposed to the internet is the edge proxy (Caddy) behind one load
+  balancer: HTTPS with Let's Encrypt certificates for the bank's DuckDNS names, HTTP
+  redirected to HTTPS, HSTS. It overwrites X-Forwarded-For with the caller's address, and
+  the gateway trusts only that last entry, so a client can't fake its IP for rate limits.
 - The gateway refuses request bodies over 6 MB before they reach a service, limits the
   one file endpoint that needs no login per client address, and serves the web app with
   a Content-Security-Policy that allows scripts only from its own origin and forbids framing.

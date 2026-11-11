@@ -13,6 +13,8 @@ locals {
       JWT_SECRET      = random_password.jwt_secret.result
       STAFF_BOOTSTRAP = var.staff_bootstrap
     },
+    # Only when set: Secret Manager refuses an empty secret.
+    { for k, v in { DUCKDNS_TOKEN = var.duckdns_token } : k => v if v != "" },
   )
 }
 

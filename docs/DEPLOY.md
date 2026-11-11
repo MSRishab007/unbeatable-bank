@@ -78,8 +78,35 @@ an admin merges it anyway; only image tags change in it.
 ```bash
 make status          # ArgoCD applications, pods, autoscalers
 make url             # public URL of the bank
-ADMIN_PASSWORD=... ANALYST_PASSWORD=... make smoke
+make smoke           # staff passwords are read from infra/main/terraform.tfvars
 ```
+
+### A fixed HTTPS address (DuckDNS)
+
+The load balancer gets a new IP after every `make up`. Two free DuckDNS names follow it:
+**https://unbeatable-bank.duckdns.org** and **https://ubank.duckdns.org**.
+
+- **Edge:** Caddy (`deploy/bank/edge.yaml`, generated) sits behind the only load balancer.
+  It gets a free Let's Encrypt certificate for each name, keeps it on a 1 GB disk (so
+  `make down` / `make up` don't re-issue it), sends `http://` to `https://`, and passes
+  requests to the gateway. By bare IP the bank is plain HTTP (no certificate exists for an IP).
+- **Names:** the `dns-updater` CronJob checks every 2 minutes and points both names at the
+  load balancer's current IP. `make dns` runs it at once.
+- **Setup, once:** sign in at https://www.duckdns.org with the account that owns both
+  names, copy its token, and add one line to `infra/main/terraform.tfvars` (and to the
+  copy in `gs://<project>-tfstate/tfvars/main.tfvars`):
+
+  ```hcl
+  duckdns_token = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+  ```
+
+  Then `make up` (or `terraform -chdir=infra/main apply` and `terraform -chdir=infra/platform apply`).
+  Terraform stores it in Secret Manager and in the cluster Secret `bank-secrets`; it is
+  never in Git. Once the token line is there, `make smoke`, `make ui-test`, `make simulate`
+  and `make loadtest` use `https://unbeatable-bank.duckdns.org`.
+
+HTTPS also lets phones use the camera to scan payment QR codes (browsers allow the camera
+only on secure pages).
 
 `make argocd` and `make grafana` open the two UIs through a port-forward.
 
@@ -101,7 +128,8 @@ make down
 
 Scales the cluster to zero nodes, stops Cloud SQL, deletes Dataproc and the
 load balancer. Data is kept. What remains costs a few cents a day (disks).
-`make up` brings everything back; the public IP will be a new one.
+`make up` brings everything back; the public IP will be a new one, and the DuckDNS
+names follow it within about 2 minutes.
 
 ## Demo script
 

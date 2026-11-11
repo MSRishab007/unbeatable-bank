@@ -161,12 +161,12 @@ def test_staff_routes_check_roles(client, up):
 
 def test_payment_forwarding_keeps_status_body_and_idempotency_key(client, up):
     r = client.post("/api/payments", headers={**customer(), "Idempotency-Key": "abc-123", "X-Pin": "583921",
-                                              "X-Forwarded-For": "198.51.100.4, 10.0.0.1"},
+                                              "X-Forwarded-For": "10.9.9.9, 198.51.100.4"},
                     json={"from_account_id": RIYA_ACCOUNT, "payee": "500100000016", "amount": 100})
     assert r.status_code == 422 and r.json()["decline_code"] == "INSUFFICIENT_FUNDS"
     call = up.last("intake")
     assert call["headers"]["idempotency-key"] == "abc-123"
-    assert call["headers"]["x-client-ip"] == "198.51.100.4"
+    assert call["headers"]["x-client-ip"] == "198.51.100.4"     # the edge's entry, not what the caller wrote
     assert json.loads(call["body"])["amount"] == 100
     assert "x-pin" not in call["headers"]                             # the PIN stops at the gateway
 

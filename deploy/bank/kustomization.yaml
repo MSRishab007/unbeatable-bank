@@ -6,6 +6,7 @@ namespace: bank
 resources:
 - common.yaml
 - dynastore.yaml
+- edge.yaml
 - gateway.yaml
 - identity.yaml
 - account.yaml

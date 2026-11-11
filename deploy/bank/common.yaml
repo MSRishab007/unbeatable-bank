@@ -50,14 +50,16 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: gateway-public
+  name: edge-public
 spec:
   podSelector:
     matchLabels:
-      app: gateway
+      app: edge
   policyTypes:
   - Ingress
   ingress:
   - ports:
     - port: 8080
+      protocol: TCP
+    - port: 8443
       protocol: TCP

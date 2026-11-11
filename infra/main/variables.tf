@@ -84,6 +84,13 @@ variable "brevo_api_key" {
   sensitive   = true
 }
 
+variable "duckdns_token" {
+  description = "DuckDNS account token: the cluster keeps the bank's DuckDNS names pointing at its load balancer. Empty = names are not updated."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 variable "kafka_bootstrap_nodeport" {
   description = "NodePort of the Kafka bootstrap listener (must match deploy/kafka/kafka.yaml)."
   type        = number

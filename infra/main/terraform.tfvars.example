@@ -9,3 +9,7 @@ staff_bootstrap = "admin:ADMIN:change-me-1,analyst1:ANALYST:change-me-2,analyst2
 # Optional: real emails through Brevo (https://www.brevo.com, free tier).
 # email_from    = "you@example.com"
 # brevo_api_key = "xkeysib-..."
+
+# Optional: keep https://unbeatable-bank.duckdns.org and https://ubank.duckdns.org pointing at
+# the cluster. The token is on https://www.duckdns.org after signing in (the account that owns both names).
+# duckdns_token = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"

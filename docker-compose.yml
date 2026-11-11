@@ -49,7 +49,9 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./infra/local/postgres-init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      # Over TCP on purpose: while the init script runs, Postgres serves only its local socket,
+      # so a socket check says "ready" before the service databases and users exist.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres && psql -h 127.0.0.1 -U postgres -d docstore -tAc 'select 1' | grep -q 1"]
       interval: 3s
       retries: 30
 

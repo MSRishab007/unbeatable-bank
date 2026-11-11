@@ -22,7 +22,16 @@ class Cluster:
     def __init__(self, tmp_path, size=5, **node_kwargs):
         self.tmp_path = tmp_path
         self.ids = [f"node-{i}" for i in range(size)]
-        self.peers = {node_id: f"127.0.0.1:{free_port()}" for node_id in self.ids}
+        used_ports = set()
+
+        def unique_port() -> int:
+            while True:
+                port = free_port()
+                if port not in used_ports:
+                    used_ports.add(port)
+                    return port
+
+        self.peers = {node_id: f"127.0.0.1:{unique_port()}" for node_id in self.ids}
         self.kwargs = dict(n=3, r=2, w=2, heartbeat_interval=0.1, hint_interval=0.1, sync_interval=0,
                            sweep_interval=0, rpc_timeout=0.3)
         self.kwargs.update(node_kwargs)

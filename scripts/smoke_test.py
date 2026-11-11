@@ -24,7 +24,10 @@ import httpx
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 BASE = (args[0] if args else os.getenv("GATEWAY_URL", "http://localhost:8080")).rstrip("/")
 SKIP_EOD = "--skip-eod" in sys.argv
-G = httpx.Client(base_url=BASE, timeout=30)
+# Each run looks like a different client address, so repeated runs don't trip the per-IP login
+# limit. Only honoured when the gateway runs with ALLOW_SIM_HEADERS=true (local stacks and the demo).
+RUN_IP = f"10.{uuid.uuid4().int % 250 + 1}.{uuid.uuid4().int % 250 + 1}.{uuid.uuid4().int % 250 + 1}"
+G = httpx.Client(base_url=BASE, timeout=30, headers={"X-Sim-Ip": RUN_IP})
 RS = 100
 PASSWORD = "correct-horse-battery-1"
 failures = 0
@@ -116,6 +119,47 @@ check("customers cannot call staff APIs (403)", G.get("/api/staff/cases", header
 alias = f"arjun{uuid.uuid4().int % 10**6}"
 check("payment alias created",
       G.post(f"/api/accounts/{arjun['account_id']}/alias", headers=arjun["H"], json={"alias": alias}).status_code == 201)
+
+# ---------------------------------------------------------------------------------------------
+print("1b. KYC documents (Identity -> Cloud Storage; staff review -> Account)")
+PNG_DOC = b"\x89PNG\r\n\x1a\n" + uuid.uuid4().bytes * 20
+PDF_DOC = b"%PDF-1.4\n" + uuid.uuid4().bytes * 20
+run = uuid.uuid4().int % 10**9
+kyc_email = f"kyc.{run}@example.com"
+reg = G.post("/api/auth/register", json={"full_name": "Kiran Rao", "date_of_birth": "1995-02-11",
+                                         "phone": f"+918{run:09d}", "email": kyc_email, "password": PASSWORD}).json()
+kiran = {"Authorization": f"Bearer {login(kyc_email, 'kiran-phone')['access_token']}"}
+kiran_account = G.post("/api/accounts", headers=kiran, json={"product_type": "SAVINGS"}).json()
+check("account opened before KYC waits as PENDING_KYC", kiran_account.get("status") == "PENDING_KYC", kiran_account)
+bad = G.post("/api/kyc/documents", params={"doc_type": "PAN"}, headers={**kiran, "Content-Type": "image/png"},
+             content=b"<script>not a picture</script>")
+check("a file that is not a picture or PDF is refused (422)", bad.status_code == 422, bad.text)
+pan = G.post("/api/kyc/documents", params={"doc_type": "PAN"}, headers={**kiran, "Content-Type": "image/png"}, content=PNG_DOC)
+addr = G.post("/api/kyc/documents", params={"doc_type": "ADDRESS_PROOF"}, headers={**kiran, "Content-Type": "application/pdf"},
+              content=PDF_DOC)
+check("PAN and address proof uploaded", pan.status_code == 201 and addr.status_code == 201, pan.text + addr.text)
+pan_id, addr_id = pan.json().get("document_id"), addr.json().get("document_id")
+mine = G.get(f"/api/kyc/documents/{pan_id}/content", headers=kiran)
+check("owner downloads exactly what was uploaded", mine.status_code == 200 and mine.content == PNG_DOC, mine.status_code)
+check("another customer cannot (404)", G.get(f"/api/kyc/documents/{pan_id}/content", headers=riya["H"]).status_code == 404)
+check("fraud analysts cannot open ID documents (403)",
+      G.get(f"/api/staff/kyc-documents/{pan_id}/content", headers=ANALYST1).status_code == 403)
+seen = G.get(f"/api/staff/kyc-documents/{pan_id}/content", headers=ADMIN)
+check("a KYC reviewer can, and the file is served with sandbox headers",
+      seen.content == PNG_DOC and seen.headers.get("content-security-policy", "").startswith("sandbox"), seen.headers)
+rejected = G.post(f"/api/staff/kyc-documents/{pan_id}/reject", headers=ADMIN, json={"reason": "The number is not readable"})
+check("reviewer rejects the PAN; the file is deleted (410)", rejected.json().get("status") == "REJECTED" and
+      G.get(f"/api/kyc/documents/{pan_id}/content", headers=kiran).status_code == 410, rejected.text)
+pan2 = G.post("/api/kyc/documents", params={"doc_type": "PAN"}, headers={**kiran, "Content-Type": "image/png"},
+              content=PNG_DOC + b"clearer").json()
+G.post(f"/api/staff/kyc-documents/{addr_id}/approve", headers=ADMIN)
+done = G.post(f"/api/staff/kyc-documents/{pan2.get('document_id')}/approve", headers=ADMIN).json()
+check("both documents approved: KYC verified", done.get("kyc_verified") is True, done)
+check("the waiting account is now ACTIVE", G.get(f"/api/accounts/{kiran_account['account_id']}", headers=kiran).json()
+      .get("status") == "ACTIVE" and G.get("/api/me", headers=kiran).json().get("kyc_status") == "VERIFIED")
+trail = [e["event_type"] for e in G.get(f"/api/staff/customers/{reg['customer_id']}/kyc-events", headers=ADMIN).json()]
+check(f"audit trail: {', '.join(trail)}",
+      trail == ["UPLOADED", "UPLOADED", "VIEWED", "REJECTED", "UPLOADED", "APPROVED", "APPROVED", "KYC_VERIFIED"], trail)
 
 # ---------------------------------------------------------------------------------------------
 print("2. Payments (Gateway -> Intake -REST-> Account, -gRPC-> Rate limit, Risk, Ledger)")
@@ -263,6 +307,43 @@ if not SKIP_EOD:
           "FD_MATURITY" in kinds and "RD_INSTALLMENT" in kinds, kinds)
     check("EOD rerun is safe: balance above Rs 1,00,000 principal + interest - installments",
           balance(dave) > 190_000 * RS, balance(dave))
+
+# ---------------------------------------------------------------------------------------------
+print("8b. Statements (Deposits -> Ledger -> Cloud Storage)")
+from datetime import date as _date, timedelta as _timedelta   # noqa: E402
+
+bank_today = _date.fromisoformat(G.get("/api/staff/ops/clock", headers=ADMIN).json()["business_date"])
+stm = f"/api/accounts/{riya['account_id']}/statements"
+listing = G.get(stm, headers=riya["H"])
+check("statement months listed for the account", listing.status_code == 200 and "periods" in listing.json(), listing.text)
+check("someone else's statements look like they don't exist (404)", G.get(stm, headers=arjun["H"]).status_code == 404)
+interim = G.get(f"{stm}/interim", headers=riya["H"], timeout=60,
+                params={"date_from": (bank_today - _timedelta(days=200)).isoformat(), "date_to": bank_today.isoformat()})
+check("interim statement for a date range is a PDF", interim.status_code == 200 and interim.content.startswith(b"%PDF-")
+      and interim.headers.get("content-type") == "application/pdf", interim.text[:200])
+unregistered = G.post("/api/statements/verify", content=interim.content)
+check("an interim statement is not a registered one", unregistered.json().get("genuine") is False, unregistered.text)
+periods = listing.json().get("periods", []) if listing.status_code == 200 else []
+if periods:
+    period = periods[-1]["period"]                      # the month the account was opened in
+    pdf = G.get(f"{stm}/{period}", headers=riya["H"], timeout=60)
+    again = G.get(f"{stm}/{period}", headers=riya["H"], timeout=60)
+    check(f"monthly statement {period} issued; asking again returns the identical file",
+          pdf.status_code == 200 and pdf.content.startswith(b"%PDF-") and again.content == pdf.content, pdf.text[:200])
+    verdict = G.get(f"{stm}/{period}/verify", headers=riya["H"]).json()
+    check(f"it matches the ledger ({verdict.get('entry_count')} entries) and the stored file is intact",
+          verdict.get("valid") is True, verdict)
+    genuine = G.post("/api/statements/verify", content=pdf.content).json()         # no login: anyone holding the file
+    check("anyone holding the PDF can confirm the bank issued it; the account number is masked",
+          genuine.get("genuine") is True and riya["number"] not in str(genuine)
+          and genuine.get("account_number", "").endswith(riya["number"][-4:]), genuine)
+    middle = len(pdf.content) // 2
+    forged = pdf.content[:middle] + bytes([pdf.content[middle] ^ 1]) + pdf.content[middle + 1:]
+    check("the same PDF with one byte changed is not recognised",
+          G.post("/api/statements/verify", content=forged).json().get("genuine") is False)
+else:
+    print("  note  no completed month yet for this account (the bank date is still in its opening month);")
+    print("        run without --skip-eod, which moves the calendar forward, to test monthly statements")
 
 # ---------------------------------------------------------------------------------------------
 print("9. Books and operations")

@@ -32,6 +32,11 @@ class Upstreams:
             return httpx.Response(200, json=[{"account_id": RIYA_ACCOUNT, "product_type": "SAVINGS"}])
         if service == "ledger" and request.url.path == "/v1/balances":
             return httpx.Response(200, json=[{"account_id": RIYA_ACCOUNT, "ledger_balance": 500, "available_balance": 400}])
+        if service == "identity" and request.url.path.endswith("/content"):
+            return httpx.Response(200, content=b"%PDF-file-bytes", headers={
+                "Content-Type": "application/pdf", "Content-Disposition": 'inline; filename="pan.pdf"',
+                "Content-Security-Policy": "sandbox; default-src 'none'", "Cache-Control": "no-store",
+                "Set-Cookie": "leak=1", "X-Internal-Debug": "secret"})
         if service == "intake" and request.url.path == "/v1/payments" and request.method == "POST":
             return httpx.Response(422, json={"status": "DECLINED", "decline_code": "INSUFFICIENT_FUNDS"})
         return httpx.Response(200, json={"ok": True, "service": service, "path": request.url.path})
@@ -176,3 +181,94 @@ def test_sim_headers_only_when_enabled(client, up, monkeypatch):
     monkeypatch.setenv("ALLOW_SIM_HEADERS", "true")
     client.post("/api/auth/login", headers={"X-Sim-Ip": "1.2.3.4", "X-Geo": "51.5,-0.1"}, json={})
     assert up.last()["headers"]["x-geo"] == "51.5,-0.1" and up.last()["headers"]["x-client-ip"] == "1.2.3.4"
+
+
+# ------------------------------------------------------------------ files and limits
+
+
+def test_kyc_upload_passes_the_file_through_untouched(client, up):
+    data = bytes(range(256)) * 100
+    r = client.post("/api/kyc/documents?doc_type=PAN", content=data,
+                    headers={**customer(), "Content-Type": "image/png", "X-Actor": "staff:evil:ADMIN"})
+    assert r.status_code == 200
+    call = up.last("identity")
+    assert (call["path"], call["query"], call["body"]) == ("/v1/kyc/documents", {"doc_type": "PAN"}, data)
+    assert call["headers"]["content-type"] == "image/png" and call["headers"]["x-actor"] == f"customer:{RIYA}"
+
+
+def test_kyc_review_is_for_kyc_officers_only(client, up):
+    document = str(uuid.uuid4())
+    for path, method in ((f"/api/staff/kyc-documents/{document}/content", "GET"), ("/api/staff/kyc-queue", "GET"),
+                         (f"/api/staff/kyc-documents/{document}/approve", "POST"),
+                         (f"/api/staff/kyc-documents/{document}/reject", "POST")):
+        assert client.request(method, path, headers=staff("TELLER")).status_code == 403
+        assert client.request(method, path, headers=staff("ANALYST")).status_code == 403
+        assert client.request(method, path, headers=customer()).status_code == 403
+        assert client.request(method, path).status_code == 401
+        assert client.request(method, path, headers=staff("KYC")).status_code == 200
+    assert up.last("identity")["headers"]["x-actor"] == "staff:asha:KYC"
+
+
+def test_file_downloads_keep_their_safety_headers_and_nothing_else(client, up):
+    r = client.get(f"/api/kyc/documents/{uuid.uuid4()}/content", headers=customer())
+    assert r.content == b"%PDF-file-bytes" and r.headers["content-type"] == "application/pdf"
+    assert r.headers["content-disposition"] == 'inline; filename="pan.pdf"'
+    assert r.headers["content-security-policy"] == "sandbox; default-src 'none'"       # the file's own, not the web app's
+    assert r.headers["cache-control"] == "no-store" and r.headers["x-content-type-options"] == "nosniff"
+    assert "set-cookie" not in r.headers and "x-internal-debug" not in r.headers
+
+
+def test_oversized_requests_are_refused_before_reaching_a_service(client, up, monkeypatch):
+    monkeypatch.setattr(main, "MAX_BODY_BYTES", 1000)
+    before = len(up.calls)
+    r = client.post("/api/kyc/documents?doc_type=PAN", content=b"x" * 1001, headers=customer())
+    assert r.status_code == 413 and r.json()["error"] == "BODY_TOO_LARGE"
+
+    def chunks():                                     # no Content-Length: the size is only known while reading
+        for _ in range(11):
+            yield b"x" * 100
+
+    r = client.post("/api/kyc/documents?doc_type=PAN", content=chunks(), headers=customer())
+    assert r.status_code == 413 and len(up.calls) == before
+    assert client.post("/api/kyc/documents?doc_type=PAN", content=b"x" * 1000, headers=customer()).status_code == 200
+
+
+def test_web_app_cannot_be_framed_or_load_foreign_scripts(client):
+    page = client.get("/")
+    csp = page.headers["content-security-policy"]
+    assert "script-src 'self'" in csp and "frame-ancestors 'none'" in csp and "object-src 'none'" in csp
+    assert page.headers["x-frame-options"] == "DENY" and page.headers["x-content-type-options"] == "nosniff"
+    api = client.get("/api/deposits/rates")
+    assert "content-security-policy" not in api.headers and api.headers["x-content-type-options"] == "nosniff"
+
+
+def test_statement_routes(client, up):
+    base = f"/api/accounts/{RIYA_ACCOUNT}/statements"
+    assert client.get(f"{base}/interim?date_from=2026-11-01&date_to=2026-11-10", headers=customer()).status_code == 200
+    call = up.last("deposits")
+    assert call["path"].endswith("/statements/interim") and call["query"] == {"date_from": "2026-11-01", "date_to": "2026-11-10"}
+    assert client.get(f"{base}/2026-10", headers=customer()).status_code == 200
+    assert up.last("deposits")["path"] == f"/v1/accounts/{RIYA_ACCOUNT}/statements/2026-10"
+    assert client.get(f"{base}/2026-10/verify", headers=customer()).status_code == 200
+    assert client.get(base, headers=customer(ARJUN)).status_code == 404            # not a holder
+    assert client.get(f"{base}/2026-10", headers=customer(ARJUN)).status_code == 404
+    assert client.get(f"/api/staff/accounts/{RIYA_ACCOUNT}/statements/2026-10", headers=staff("TELLER")).status_code == 200
+    assert client.get(f"/api/staff/accounts/{RIYA_ACCOUNT}/statements/2026-10", headers=customer()).status_code == 403
+
+    # Checking a PDF needs no login; whatever identity the caller claims is not passed on.
+    r = client.post("/api/statements/verify", content=b"%PDF-1.4 file", headers={"X-Actor": "staff:evil:ADMIN"})
+    assert r.status_code == 200
+    call = up.last("deposits")
+    assert (call["path"], call["body"]) == ("/v1/statements/verify-file", b"%PDF-1.4 file")
+    assert "x-actor" not in call["headers"]
+
+
+def test_public_statement_check_is_rate_limited_per_address(client, up, monkeypatch):
+    monkeypatch.setenv("ALLOW_SIM_HEADERS", "true")
+    lender, other = {"X-Sim-Ip": "198.51.100.7"}, {"X-Sim-Ip": "198.51.100.8"}
+    results = [client.post("/api/statements/verify", content=b"%PDF-x", headers=lender).status_code for _ in range(12)]
+    assert results == [200] * 10 + [429] * 2
+    blocked = client.post("/api/statements/verify", content=b"%PDF-x", headers=lender)
+    assert blocked.json()["error"] == "TOO_MANY_REQUESTS" and int(blocked.headers["retry-after"]) >= 1
+    assert client.post("/api/statements/verify", content=b"%PDF-x", headers=other).status_code == 200   # someone else is fine
+    assert len([c for c in up.calls if c["path"] == "/v1/statements/verify-file"]) == 11

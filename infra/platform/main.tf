@@ -31,19 +31,20 @@ resource "kubernetes_config_map" "infra" {
   data = {
     GCP_PROJECT        = local.main.project_id
     GCS_BUCKET         = local.main.reports_bucket
+    KYC_BUCKET         = local.main.kyc_bucket
     FIRESTORE_DATABASE = local.main.firestore_database
   }
 }
 
-# Workload Identity: these Kubernetes service accounts act as the Google
-# service account ub-apps (Firestore, Pub/Sub, Cloud Storage). No key files.
+# Workload Identity: each of these Kubernetes service accounts acts as a Google
+# service account (Firestore, Pub/Sub, Cloud Storage). No key files.
 resource "kubernetes_service_account" "workload_identity" {
-  for_each = toset(local.main.workload_identity_users)
+  for_each = local.main.workload_identity
   metadata {
-    name      = each.value
+    name      = each.key
     namespace = kubernetes_namespace.bank.metadata[0].name
     annotations = {
-      "iam.gke.io/gcp-service-account" = local.main.apps_service_account
+      "iam.gke.io/gcp-service-account" = each.value
     }
   }
 }

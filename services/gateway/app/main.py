@@ -13,6 +13,7 @@ Environment:
     IDENTITY_URL, ACCOUNT_URL, LEDGER_URL, INTAKE_URL, DEPOSITS_URL, FRAUD_URL,
     DYNASTORE_URL, RATELIMIT_URL, RISK_URL
     ALLOW_SIM_HEADERS=true             accept X-Sim-Ip / X-Geo from clients (fraud simulator only)
+    MAX_BODY_BYTES                     largest request body accepted (default 6 MB: a KYC document)
 """
 
 from __future__ import annotations
@@ -36,6 +37,16 @@ from ubcommon.metrics import instrument
 from .routes import ROUTES, Route
 
 SERVICES = ("identity", "account", "ledger", "intake", "deposits", "fraud", "dynastore", "ratelimit", "risk")
+# Response headers passed back from internal services. Files (KYC documents, statements) carry
+# their own safety headers; everything else an upstream sends is dropped.
+_PASS_BACK = {"content-type", "retry-after", "content-disposition", "x-content-type-options",
+              "content-security-policy", "cache-control"}
+MAX_BODY_BYTES = int(os.getenv("MAX_BODY_BYTES", str(6 * 1024 * 1024)))
+# The web app is static files from this origin plus Google Fonts; nothing else may load or frame it.
+_WEB_CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+            "font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; "
+            "frame-src blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; "
+            "frame-ancestors 'none'")
 _HOP_HEADERS = {"connection", "keep-alive", "transfer-encoding", "content-length", "content-encoding", "host"}
 _state: dict = {}
 _COMPILED = [(route, route.regex()) for route in ROUTES]
@@ -63,6 +74,40 @@ instrument(app, "gateway")
 
 def error(status: int, code: str, message: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"error": code, "message": message})
+
+
+class BodyTooLarge(Exception):
+    pass
+
+
+@app.exception_handler(BodyTooLarge)
+def body_too_large(_: Request, __: BodyTooLarge):
+    return error(413, "BODY_TOO_LARGE", f"the request is larger than {MAX_BODY_BYTES // (1024 * 1024)} MB")
+
+
+async def read_body(request: Request) -> bytes:
+    """The request body, refusing anything over MAX_BODY_BYTES without buffering it all first."""
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+        raise BodyTooLarge()
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > MAX_BODY_BYTES:
+            raise BodyTooLarge()
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    if not request.url.path.startswith("/api/"):
+        response.headers.setdefault("Content-Security-Policy", _WEB_CSP)
+        response.headers.setdefault("X-Frame-Options", "DENY")
+    return response
 
 
 def client_ip(request: Request) -> str:
@@ -132,12 +177,32 @@ async def forward(request: Request, service: str, path: str, claims: dict | None
     try:
         r = await _state["http"].request(
             request.method, url, params=dict(request.query_params),
-            content=body if body is not None else await request.body(),
+            content=body if body is not None else await read_body(request),
             headers=actor_headers(request, claims))
     except httpx.HTTPError:
         return error(503, "UPSTREAM_UNAVAILABLE", f"the {service} service is not reachable right now")
-    headers = {k: v for k, v in r.headers.items() if k.lower() in ("content-type", "retry-after")}
+    headers = {k: v for k, v in r.headers.items() if k.lower() in _PASS_BACK}
     return Response(content=r.content, status_code=r.status_code, headers=headers)
+
+
+def over_limit(route: Route, ip: str) -> int:
+    """Seconds to wait if this address has used up the route's allowance, else 0.
+
+    Counted in this pod's memory, so with several gateway pods the real ceiling is a few
+    times higher. It is a brake on abuse of endpoints that need no login, not an exact quota
+    (payments and logins are limited precisely by the Rate Limit Coordinator)."""
+    count, window = route.limit
+    hits: dict = _state.setdefault("route_hits", {})
+    now = time.monotonic()
+    recent = [t for t in hits.get((route.path, ip), []) if now - t < window]
+    if len(recent) >= count:
+        hits[(route.path, ip)] = recent
+        return max(1, int(window - (now - recent[0])) + 1)
+    recent.append(now)
+    hits[(route.path, ip)] = recent
+    if len(hits) > 50_000:                          # forget everything rather than grow without bound
+        hits.clear()
+    return 0
 
 
 def authorize(route: Route, claims: dict | None) -> JSONResponse | None:
@@ -202,7 +267,7 @@ async def open_account(request: Request):
     if claims is None or claims["role"] != "customer":
         return error(401, "UNAUTHENTICATED", "log in to continue")
     try:
-        body = json.loads(await request.body() or b"{}")
+        body = json.loads(await read_body(request) or b"{}")
     except ValueError:
         return error(400, "INVALID_REQUEST", "body must be JSON")
     joint = [h for h in body.pop("joint_holder_ids", []) if h != claims["sub"]]
@@ -227,6 +292,12 @@ async def proxy(request: Request, rest: str):
         denied = authorize(route, claims)
         if denied:
             return denied
+        if route.limit:
+            wait = over_limit(route, client_ip(request))
+            if wait:
+                response = error(429, "TOO_MANY_REQUESTS", f"too many requests; try again in {wait} seconds")
+                response.headers["Retry-After"] = str(wait)
+                return response
         params = match.groupdict()
         if route.owner == "account" and not await is_holder(params["account_id"], claims["sub"]):
             return error(404, "NOT_FOUND", "account not found")   # same answer as a non-existent account

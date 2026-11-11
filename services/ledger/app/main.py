@@ -130,6 +130,12 @@ def balance(account_id: UUID, conn=Depends(get_conn)):
     return posting.get_balance(conn, account_id)
 
 
+@app.get("/v1/accounts/{account_id}/statement")
+def statement(account_id: UUID, date_from: date, date_to: date, conn=Depends(get_conn)):
+    """Entries for a range of business dates with opening and closing balances (for statements)."""
+    return posting.statement(conn, account_id, date_from, date_to)
+
+
 @app.get("/v1/accounts/{account_id}/entries")
 def entries(account_id: UUID, before: int | None = None, limit: int = 50, conn=Depends(get_conn)):
     posting.get_balance(conn, account_id)  # 404 if unknown

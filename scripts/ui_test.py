@@ -4,8 +4,9 @@
     python scripts/ui_test.py                      # stack on http://localhost:8080
     python scripts/ui_test.py --base-url http://<ip> --shots /tmp/shots
 
-It plays a customer (sign-up, account, QR payment, OTP challenge, deposits) and
-bank staff (KYC, cash deposit, fraud desk, DynaStore fault injection), on a
+It plays a customer (sign-up, KYC documents, account, QR payment, OTP challenge,
+deposits) and bank staff (document review, cash deposit, fraud desk, DynaStore
+fault injection), on a
 desktop and a phone-sized screen, and fails on any JavaScript error.
 """
 
@@ -62,6 +63,25 @@ def watch(page: Page, who: str) -> None:
 
 
 api = httpx.Client(base_url=BASE, timeout=30)
+
+
+def png_image(width: int, height: int, rgb: tuple[int, int, int]) -> bytes:
+    """A real PNG of one colour, so the browser can display what was uploaded."""
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    rows = b"".join(b"\x00" + bytes(rgb) * width for _ in range(height))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+
+
+PDF_FILE = (b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+            b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+            b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 200]>>endobj\n"
+            b"trailer<</Root 1 0 R>>\n%%EOF\n")
 
 
 def make_customer_by_api(name: str, n: int) -> dict:
@@ -131,22 +151,82 @@ with sync_playwright() as pw:
         other.close()
     step("a wrong password shows an error and stays on the sign-in page", wrong_password)
 
-    def staff_kyc():
+    files = Path(os.getenv("TMPDIR", "/tmp")) / f"ui-test-files-{RUN}"
+    files.mkdir(parents=True, exist_ok=True)
+    (files / "pan.png").write_bytes(png_image(320, 200, (27, 42, 107)))
+    (files / "pan-clear.png").write_bytes(png_image(320, 200, (31, 122, 77)))
+    (files / "address.pdf").write_bytes(PDF_FILE)
+    (files / "virus.png").write_bytes(b"MZ this is a program, not a picture" * 20)
+
+    def upload_documents():
+        page.get_by_role("link", name="Upload your documents").click()
+        expect(page.get_by_role("heading", name="Identity documents")).to_be_visible()
+        page.locator("[data-kyc-file=PAN]").set_input_files(str(files / "virus.png"))
+        expect(page.locator(".toast.bad")).to_contain_text("JPEG or PNG")          # judged by content, not by name
+        expect(page.locator("[data-kyc=PAN]")).to_contain_text("Needed")
+        page.locator("[data-kyc-file=PAN]").set_input_files(str(files / "pan.png"))
+        expect(page.locator("[data-kyc=PAN]")).to_contain_text("Being reviewed")
+        page.locator("[data-kyc-file=ADDRESS_PROOF]").set_input_files(str(files / "address.pdf"))
+        expect(page.locator("[data-kyc=ADDRESS_PROOF]")).to_contain_text("Being reviewed")
+        page.locator("[data-kyc=PAN]").get_by_role("button", name="View").click()
+        expect(page.locator("dialog img.file-view")).to_be_visible()
+        assert page.locator("dialog img.file-view").evaluate("img => img.naturalWidth") == 320
+        shot(page, "02a-kyc-upload")
+        page.locator("dialog").get_by_role("button", name="Close").click()
+    step("customer uploads PAN and address proof; a disguised program is refused", upload_documents)
+
+    def staff_review():
         staff.goto(BASE + "/#/staff")
+        staff.get_by_label("Staff ID").fill("kyc1")
+        staff.get_by_label("Password").fill(os.getenv("KYC_PASSWORD", "kyc-dev-pass"))
+        staff.get_by_role("button", name="Sign in to the staff console").click()
+        expect(staff.locator("#branch-heading")).to_contain_text("to review")
+        card = staff.locator("[data-customer]").filter(has_text=email)
+        card.locator("[data-doc-type=PAN]").get_by_role("button", name="View").click()
+        expect(staff.locator("dialog img.file-view")).to_be_visible()
+        shot(staff, "10a-kyc-review")
+        staff.locator("dialog").get_by_role("button", name="Close").click()
+        card.locator("[data-doc-type=PAN]").get_by_role("button", name="Reject").click()
+        staff.locator("dialog input[name=reason]").fill("The card number is not readable")
+        staff.get_by_role("button", name="Reject and delete the file").click()
+        expect(card.locator("[data-doc-type=PAN]")).to_contain_text("Rejected")
+        card.locator("[data-doc-type=ADDRESS_PROOF]").get_by_role("button", name="Approve").click()
+        expect(card.locator("[data-doc-type=ADDRESS_PROOF]")).to_contain_text("Approved")
+        expect(card.get_by_text("Pending").first).to_be_visible()                    # one accepted document is not enough
+    step("KYC officer opens the PAN, rejects it with a reason, accepts the address proof", staff_review)
+
+    def upload_again():
+        page.reload()
+        expect(page.locator("[data-kyc=PAN]")).to_contain_text("Not accepted: The card number is not readable")
+        expect(page.locator("[data-kyc=ADDRESS_PROOF]")).to_contain_text("Accepted")
+        expect(page.locator("[data-kyc=ADDRESS_PROOF]").get_by_role("button", name="Replace")).to_have_count(0)
+        page.get_by_role("link", name="Inbox").click()
+        expect(page.locator("main")).to_contain_text("Please upload your PAN card again")
+        page.get_by_role("link", name="Security", exact=True).click()
+        page.locator("[data-kyc-file=PAN]").set_input_files(str(files / "pan-clear.png"))
+        expect(page.locator("[data-kyc=PAN]")).to_contain_text("Being reviewed")
+    step("customer sees the reason, gets a message, and uploads a better picture", upload_again)
+
+    def staff_kyc():
+        staff.reload()
+        card = staff.locator("[data-customer]").filter(has_text=email)
+        card.locator("[data-doc-type=PAN]").get_by_role("button", name="Approve").first.click()
+        expect(staff.get_by_text("All documents accepted: Asha Rao is verified")).to_be_visible()
+        staff.locator(".mobile-top, nav.rail").get_by_text("Sign out").first.click()
         staff.get_by_label("Staff ID").fill("admin")
         staff.get_by_label("Password").fill(ADMIN_PASSWORD)
         staff.get_by_role("button", name="Sign in to the staff console").click()
         staff.get_by_role("link", name="Branch desk").click()
         staff.get_by_label("Find a customer").fill(email)
         staff.get_by_role("button", name="Find").click()
-        card = staff.locator("[data-customer]").filter(has_text="Asha Rao")
-        card.get_by_role("button", name="Verify KYC").click()
+        card = staff.locator("[data-customer]").filter(has_text=email)
         expect(card.get_by_text("Verified")).to_be_visible()
+        expect(card.get_by_role("button", name="Verify in person")).to_have_count(0)
         shot(staff, "10-staff-branch")
-    step("staff find the customer by email and verify KYC", staff_kyc)
+    step("the second approval verifies the customer; staff find them by email", staff_kyc)
 
     def cash():
-        card = staff.locator("[data-customer]").filter(has_text="Asha Rao")
+        card = staff.locator("[data-customer]").filter(has_text=email)
         card.get_by_role("button", name="Cash deposit").click()
         staff.locator("dialog input[name=amount]").fill("50000")
         staff.get_by_role("button", name="Deposit cash").click()
@@ -158,7 +238,8 @@ with sync_playwright() as pw:
     print("\n2. Accounts and passbook")
 
     def passbook():
-        page.reload()
+        page.get_by_role("link", name="Accounts", exact=True).click()
+        page.locator("a.cover").first.click()
         expect(page.locator("#available")).to_have_text("₹50,000.00")
         expect(page.locator("table.passbook tbody tr")).to_have_count(1)
         expect(page.locator("table.passbook")).to_contain_text("Cash deposit")
@@ -316,6 +397,53 @@ with sync_playwright() as pw:
         page.reload()
         expect(page.get_by_role("heading", name="Security")).to_be_visible()
     step("a reload keeps the session", session_survives_reload)
+
+    print("\n5b. Statements")
+
+    def statements():
+        # A month has to be over before it has a statement: move the bank's calendar forward.
+        admin = api.post("/api/staff/login", json={"staff_id": "admin", "password": ADMIN_PASSWORD}).json()
+        api.post("/api/staff/ops/eod/fast-forward", json={"days": 35}, timeout=600,
+                 headers={"Authorization": f"Bearer {admin['access_token']}"}).raise_for_status()
+        page.get_by_role("link", name="Accounts", exact=True).click()
+        page.locator("a.cover").first.click()
+        expect(page.get_by_role("heading", name="Statements")).to_be_visible()
+        if page.locator("#more-statements").count():
+            page.locator("#more-statements").click()
+        first = page.locator("[data-statement]").last                     # the month the account opened in
+        expect(first).to_contain_text("Not downloaded yet")
+        first.get_by_role("button", name="Open").click()
+        expect(page.locator("dialog iframe.file-view")).to_be_visible()
+        expect(page.locator("dialog a[download]")).to_have_attribute("download", re.compile(r"^statement-\d{4}-\d{4}-\d{2}\.pdf$"))
+        shot(page, "11a-statement")
+        page.locator("dialog").get_by_role("button", name="Close").click()
+        first.get_by_role("button", name="Check").click()
+        expect(page.locator(".toast").filter(has_text="matches the ledger")).to_be_visible()
+        page.locator("#interim-form").get_by_role("button", name="Get statement").click()
+        expect(page.locator("dialog iframe.file-view")).to_be_visible()
+        page.locator("dialog").get_by_role("button", name="Close").click()
+    step("opens a monthly statement, checks it against the ledger, gets one for any dates", statements)
+
+    def check_statement_is_genuine():
+        token = page.evaluate("JSON.parse(sessionStorage.getItem('ub.session')).access")
+        period = page.locator("[data-statement]").last.get_attribute("data-statement")
+        account_id = page.url.rsplit("/", 1)[-1]
+        pdf = api.get(f"/api/accounts/{account_id}/statements/{period}", headers={"Authorization": f"Bearer {token}"}).content
+        (files / "statement.pdf").write_bytes(pdf)
+        (files / "forged.pdf").write_bytes(pdf[:len(pdf) // 2] + bytes([pdf[len(pdf) // 2] ^ 1]) + pdf[len(pdf) // 2 + 1:])
+        ctx = browser.new_context()                                        # a lender: not signed in
+        lender = ctx.new_page()
+        watch(lender, "lender")
+        lender.goto(BASE + "/")
+        lender.get_by_role("button", name="Check it is genuine").click()
+        lender.locator("#statement-file").set_input_files(str(files / "statement.pdf"))
+        expect(lender.locator("#statement-check-result")).to_contain_text("Genuine")
+        expect(lender.locator("#statement-check-result")).to_contain_text("xxxxxxxx")          # account number masked
+        shot(lender, "11b-statement-genuine")
+        lender.locator("#statement-file").set_input_files(str(files / "forged.pdf"))
+        expect(lender.locator("#statement-check-result")).to_contain_text("Not recognised")
+        ctx.close()
+    step("someone given the PDF confirms it is genuine without signing in; an edited copy fails", check_statement_is_genuine)
 
     print("\n6. Staff console")
 

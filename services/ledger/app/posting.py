@@ -253,6 +253,51 @@ def list_entries(
         return cur.fetchall()
 
 
+MAX_STATEMENT_ENTRIES = 5000
+
+
+def statement(conn: psycopg.Connection, account_id: UUID, date_from: date, date_to: date) -> dict:
+    """An account's entries for a range of business dates, oldest first, with the balance
+    carried forward: opening balance, each entry with the balance after it, closing balance.
+
+    Ordered by business date (then posting order), and the opening balance is the sum of
+    everything dated earlier, so the figures are right even if an entry was posted late
+    with an earlier business date.
+    """
+    if date_from > date_to:
+        raise InvalidJournal("the statement period ends before it starts")
+    get_balance(conn, account_id)  # AccountNotFound if unknown
+    with _cursor(conn) as cur:
+        cur.execute(
+            "SELECT COALESCE(SUM(e.amount), 0)::bigint AS opening FROM ledger.entries e "
+            "JOIN ledger.journals j USING (journal_id) WHERE e.account_id = %s AND j.business_date < %s",
+            (account_id, date_from))
+        opening = cur.fetchone()["opening"]
+        cur.execute(
+            """
+            SELECT e.entry_id, e.journal_id, e.amount, j.txn_type, j.description, j.business_date
+            FROM ledger.entries e JOIN ledger.journals j USING (journal_id)
+            WHERE e.account_id = %s AND j.business_date BETWEEN %s AND %s
+            ORDER BY j.business_date, e.entry_id
+            LIMIT %s
+            """,
+            (account_id, date_from, date_to, MAX_STATEMENT_ENTRIES + 1))
+        rows = cur.fetchall()
+    if len(rows) > MAX_STATEMENT_ENTRIES:
+        raise InvalidJournal(f"more than {MAX_STATEMENT_ENTRIES} entries in this period; choose a shorter one")
+    balance = opening
+    for row in rows:
+        balance += row["amount"]
+        row["balance"] = balance
+    return {
+        "account_id": account_id, "date_from": date_from, "date_to": date_to,
+        "opening_balance": opening, "closing_balance": balance,
+        "total_credits": sum(r["amount"] for r in rows if r["amount"] > 0),
+        "total_debits": -sum(r["amount"] for r in rows if r["amount"] < 0),
+        "entries": rows,
+    }
+
+
 # --------------------------------------------------------------------------- journals
 
 

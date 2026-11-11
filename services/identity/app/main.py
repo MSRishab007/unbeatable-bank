@@ -24,7 +24,8 @@ from uuid import UUID
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse, Response
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, EmailStr, Field
 
@@ -34,8 +35,9 @@ from ubcommon.docstore import get_docstore
 from ubcommon.logging_setup import setup_logging
 from ubcommon.metrics import instrument
 from ubcommon.notify import get_notifier
+from ubcommon.objstore import get_objstore
 
-from . import service
+from . import kyc, service
 
 _state: dict = {}
 
@@ -61,9 +63,12 @@ class HttpAccounts:
             raise service.IdentityError(message or "invalid customer details")
         return r.json()
 
-    def verify_kyc(self, customer_id: UUID) -> None:
-        self._http.post(f"/internal/v1/customers/{customer_id}/kyc/verify",
-                        headers={"X-Actor": "system:identity"}).raise_for_status()
+    def verify_kyc(self, customer_id: UUID, actor: str = "system:identity") -> None:
+        try:
+            self._http.post(f"/internal/v1/customers/{customer_id}/kyc/verify",
+                            headers={"X-Actor": actor}).raise_for_status()
+        except httpx.HTTPError as e:
+            raise service.Unavailable("account service unavailable; try again") from e
 
 
 def _login_limiter():
@@ -102,6 +107,7 @@ def build_deps() -> service.Deps:
         signals=signals,
         login_allowed=_login_limiter(),
         auto_verify_kyc=os.getenv("AUTO_VERIFY_KYC", "false").lower() == "true",
+        objstore=get_objstore(),
     )
 
 
@@ -110,7 +116,8 @@ async def lifespan(_: FastAPI):
     _state["pool"] = ConnectionPool(os.environ["DATABASE_URL"], min_size=1,
                                     max_size=int(os.getenv("DB_POOL_MAX", "5")),
                                     kwargs={"autocommit": True}, open=True)
-    _state.setdefault("deps", build_deps())
+    if "deps" not in _state:            # tests put their own in first
+        _state["deps"] = build_deps()
     with _state["pool"].connection() as conn:
         for entry in filter(None, os.getenv("STAFF_BOOTSTRAP", "").split(",")):
             staff_id, role, password = entry.split(":", 2)
@@ -268,3 +275,76 @@ def otp_issue(body: OtpIssueIn, conn=Depends(get_conn), deps=Depends(get_deps)):
 @app.post("/internal/v1/otp/verify")
 def otp_verify(body: OtpVerifyIn, conn=Depends(get_conn)):
     return {"result": service.verify_otp(conn, body.customer_id, body.purpose, body.code)}
+
+
+# ----------------------------------------------------------------- KYC documents
+
+
+class RejectIn(BaseModel):
+    reason: str = Field(..., min_length=5, max_length=300)
+
+
+def get_actor(x_actor: str = Header(..., alias="X-Actor")):
+    return parse_actor(x_actor)
+
+
+def _file_response(data: bytes, content_type: str, filename: str) -> Response:
+    """An uploaded file is untrusted: never let a browser guess its type or run anything in it."""
+    return Response(content=data, media_type=content_type, headers={
+        "Content-Disposition": f'inline; filename="{filename}"',
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "sandbox; default-src 'none'",
+        "Cache-Control": "no-store",
+    })
+
+
+@app.post("/v1/kyc/documents", status_code=201)
+async def kyc_upload(request: Request, doc_type: str, customer_id: UUID = Depends(get_customer),
+                     deps=Depends(get_deps)):
+    """The request body is the file itself (JPEG, PNG or PDF)."""
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > kyc.MAX_BYTES:
+        raise kyc.TooLarge(f"The file is larger than {kyc.MAX_BYTES // (1024 * 1024)} MB.")
+    data = await request.body()
+
+    def work():
+        with _state["pool"].connection() as conn:
+            return kyc.upload(conn, deps, customer_id, doc_type, data)
+
+    return await run_in_threadpool(work)
+
+
+@app.get("/v1/kyc/documents")
+def kyc_mine(customer_id: UUID = Depends(get_customer), conn=Depends(get_conn)):
+    return kyc.my_documents(conn, customer_id)
+
+
+@app.get("/v1/kyc/documents/{document_id}/content")
+def kyc_content(document_id: UUID, actor=Depends(get_actor), conn=Depends(get_conn), deps=Depends(get_deps)):
+    return _file_response(*kyc.content(conn, deps, document_id, actor))
+
+
+@app.get("/internal/v1/kyc/queue")
+def kyc_queue(limit: int = 50, conn=Depends(get_conn)):
+    return kyc.queue(conn, limit)
+
+
+@app.get("/internal/v1/kyc/customers/{customer_id}/documents")
+def kyc_customer_documents(customer_id: UUID, conn=Depends(get_conn)):
+    return kyc.customer_documents(conn, customer_id)
+
+
+@app.get("/internal/v1/kyc/customers/{customer_id}/events")
+def kyc_events(customer_id: UUID, conn=Depends(get_conn)):
+    return kyc.events(conn, customer_id)
+
+
+@app.post("/internal/v1/kyc/documents/{document_id}/approve")
+def kyc_approve(document_id: UUID, actor=Depends(get_actor), conn=Depends(get_conn), deps=Depends(get_deps)):
+    return kyc.approve(conn, deps, document_id, actor)
+
+
+@app.post("/internal/v1/kyc/documents/{document_id}/reject")
+def kyc_reject(document_id: UUID, body: RejectIn, actor=Depends(get_actor), conn=Depends(get_conn),
+               deps=Depends(get_deps)):
+    return kyc.reject(conn, deps, document_id, actor, body.reason)

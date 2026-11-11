@@ -94,6 +94,9 @@ class Ledger(Protocol):
 
     def reconciliation(self) -> dict: ...
 
+    def statement(self, account_id: UUID, date_from: date, date_to: date) -> dict:
+        """Entries for the period with opening/closing balances. Raises NotFound for an unknown account."""
+
 
 class Accounts(Protocol):
     def authorize(self, account_id: UUID, customer_id: UUID) -> dict: ...
@@ -101,6 +104,9 @@ class Accounts(Protocol):
     def open_deposit_account(self, account_id: UUID, product: str, customer_id: UUID) -> dict: ...
 
     def date_of_birth(self, customer_id: UUID) -> date | None: ...
+
+    def account(self, account_id: UUID) -> dict:
+        """account_number, product_type, opened_at, holders[{full_name}]. Raises NotFound."""
 
 
 @dataclass

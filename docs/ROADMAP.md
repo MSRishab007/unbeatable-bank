@@ -8,6 +8,17 @@ sessions.
 Status today (11 Nov): all 12 build steps done and tested locally; nothing applied
 on GCP yet.
 
+**Done since this list was written:** item 1 (CI: compose job with real Kafka and a
+node failure, adapter contract tests against emulators), item 3 (KYC document upload)
+and item 4 (PDF statements), plus from Tier 3 the web security headers, a request
+size limit and a rate limit on the public statement check. Two things were built
+differently from the notes below, on purpose: a rejected KYC file is deleted at once
+instead of after 30 days, and a monthly statement is built the first time it is
+asked for instead of for every account at month end (see docs/design.md).
+
+**Still open:** item 2 (local Prometheus and Grafana, request IDs), item 5 (ML
+anomaly score), item 6 (mule-account recovery), Tier 2, and the rest of Tier 3.
+
 ## Tier 1: build these first
 
 ### 1. Prove the Kafka path and the cloud adapters in CI (testability) — 1 session

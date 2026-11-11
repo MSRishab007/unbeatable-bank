@@ -4,6 +4,7 @@
              customer  a logged-in customer
              staff     bank staff; `roles` narrows it further (ADMIN may do everything)
     owner    "account": the customer must be a holder of the {account_id} in the path
+    limit    (requests, seconds) allowed per client address: a brake for endpoints that need no login
 
 In upstream paths, {sub} is the caller's id from the token, and other {names}
 come from the public path.
@@ -24,6 +25,7 @@ class Route:
     auth: str = "customer"
     roles: tuple[str, ...] = ()
     owner: str | None = None
+    limit: tuple[int, int] | None = None   # (requests, seconds) per client address, for public endpoints
 
     def regex(self) -> re.Pattern:
         pattern = re.sub(r"\{(\w+):path\}", r"(?P<\1>.+)", self.path)
@@ -84,6 +86,18 @@ ROUTES: list[Route] = [
     Route("GET", "/api/deposits/{deposit_id}/closure-quote", "deposits", "/v1/deposits/{deposit_id}/closure-quote"),
     Route("POST", "/api/deposits/{deposit_id}/close", "deposits", "/v1/deposits/{deposit_id}/close"),
 
+    # ---- statements (PDF). "interim" must come before "{period}": the first matching route wins.
+    Route("GET", "/api/accounts/{account_id}/statements", "deposits", "/v1/accounts/{account_id}/statements",
+          owner="account"),
+    Route("GET", "/api/accounts/{account_id}/statements/interim", "deposits",
+          "/v1/accounts/{account_id}/statements/interim", owner="account"),
+    Route("GET", "/api/accounts/{account_id}/statements/{period}", "deposits",
+          "/v1/accounts/{account_id}/statements/{period}", owner="account"),
+    Route("GET", "/api/accounts/{account_id}/statements/{period}/verify", "deposits",
+          "/v1/accounts/{account_id}/statements/{period}/verify", owner="account"),
+    Route("POST", "/api/statements/verify", "deposits", "/v1/statements/verify-file", P,
+          limit=(10, 60)),                                                                  # body: the PDF
+
     # ---- alerts and fraud reports
     Route("GET", "/api/notifications", "fraud", "/v1/notifications"),
     Route("POST", "/api/notifications/{notification_id}/read", "fraud", "/v1/notifications/{notification_id}/read"),
@@ -108,6 +122,22 @@ ROUTES: list[Route] = [
     # ---- staff: branch and operations
     Route("POST", "/api/staff/kyc/{customer_id}/verify", "account",
           "/internal/v1/customers/{customer_id}/kyc/verify", S, ("KYC",)),
+
+    # ---- KYC documents (the request body of an upload is the file itself)
+    Route("POST", "/api/kyc/documents", "identity", "/v1/kyc/documents"),
+    Route("GET", "/api/kyc/documents", "identity", "/v1/kyc/documents"),
+    Route("GET", "/api/kyc/documents/{document_id}/content", "identity", "/v1/kyc/documents/{document_id}/content"),
+    Route("GET", "/api/staff/kyc-queue", "identity", "/internal/v1/kyc/queue", S, ("KYC",)),
+    Route("GET", "/api/staff/kyc-documents/{document_id}/content", "identity",
+          "/v1/kyc/documents/{document_id}/content", S, ("KYC",)),
+    Route("POST", "/api/staff/kyc-documents/{document_id}/approve", "identity",
+          "/internal/v1/kyc/documents/{document_id}/approve", S, ("KYC",)),
+    Route("POST", "/api/staff/kyc-documents/{document_id}/reject", "identity",
+          "/internal/v1/kyc/documents/{document_id}/reject", S, ("KYC",)),
+    Route("GET", "/api/staff/customers/{customer_id}/kyc-documents", "identity",
+          "/internal/v1/kyc/customers/{customer_id}/documents", S, ("KYC",)),
+    Route("GET", "/api/staff/customers/{customer_id}/kyc-events", "identity",
+          "/internal/v1/kyc/customers/{customer_id}/events", S, ("KYC",)),
     Route("POST", "/api/staff/cash-deposits", "intake", "/internal/v1/cash-deposits", S, ("TELLER",)),
     Route("GET", "/api/staff/customers", "account", "/internal/v1/customers", S),
     Route("GET", "/api/staff/customers/{customer_id}", "account", "/v1/customers/{customer_id}", S),
@@ -117,6 +147,10 @@ ROUTES: list[Route] = [
     Route("GET", "/api/staff/accounts/{account_id}/audit", "account",
           "/internal/v1/accounts/{account_id}/events/verify", S),
     Route("GET", "/api/staff/accounts/{account_id}/transactions", "ledger", "/v1/accounts/{account_id}/entries", S),
+    Route("GET", "/api/staff/accounts/{account_id}/statements", "deposits",
+          "/v1/accounts/{account_id}/statements", S),
+    Route("GET", "/api/staff/accounts/{account_id}/statements/{period}", "deposits",
+          "/v1/accounts/{account_id}/statements/{period}", S),
     Route("GET", "/api/staff/ops/reconciliation", "ledger", "/v1/reconciliation", S),
     Route("GET", "/api/staff/ops/dynastore", "dynastore", "/v1/status", S),
     Route("GET", "/api/staff/ops/dynastore/keys/{key:path}", "dynastore", "/v1/keys/{key}", S),

@@ -155,7 +155,7 @@ flowchart LR
 | # | Service | Responsibility | Runs on | Data |
 |---|---|---|---|---|
 | 1 | **API Gateway** | Only public entry point. Verifies the JWT, checks role and account ownership, forwards with an `X-Actor` header, serves the web app | GKE, HPA | none |
-| 2 | **Identity & Auth** | Sign-up, login, JWT, devices, sessions, OTP, staff logins; detects new-device logins and impossible travel | GKE | Cloud SQL, Firestore |
+| 2 | **Identity & Auth** | Sign-up, login, JWT, devices, sessions, OTP, staff logins; detects new-device logins and impossible travel; KYC documents and their review | GKE | Cloud SQL, Firestore, GCS |
 | 3 | **Account** | Customers (one record per person), accounts of every product type, joint holders, limits, freeze, payees with cooling period, scan-to-pay aliases, hash-chained audit log | GKE | Cloud SQL |
 | 4 | **Transaction Intake** | Accepts payments and runs the admission pipeline (section 1). Idempotency, limits, OTP challenge, holds | GKE, HPA | Cloud SQL |
 | 5 | **Rate Limit Coordinator** | Shared rate-limit state and permit allocation for all pods; policies from a ConfigMap | GKE | DynaStore |
@@ -164,7 +164,7 @@ flowchart LR
 | 8 | **Fraud Alert** | Consumes events and Flink signals; alerts, automatic freezes, cases, analyst workflow with maker-checker; customer inbox API | GKE | Cloud SQL, Firestore |
 | 9 | **Notification Service** | Writes the customer inbox, simulated SMS for OTPs, optional email | **Cloud Function** | Firestore |
 | 10 | **Audit Analytics** | Windowed aggregation of the transaction stream: throughput, rejections, rate-limit decisions, unique customers, fraud patterns | **Flink on Dataproc** | Kafka, GCS checkpoints |
-| 11 | **Deposits & EOD** | Fixed and recurring deposits, rate cards, early closure, the end-of-day batch (interest, installments, maturities), bank calendar | GKE | Cloud SQL, GCS |
+| 11 | **Deposits & EOD** | Fixed and recurring deposits, rate cards, early closure, the end-of-day batch (interest, installments, maturities), bank calendar, PDF statements | GKE | Cloud SQL, GCS |
 | 12 | **DynaStore** | The leaderless key-value store (the course concept) | GKE StatefulSet | local disk |
 
 The eight services suggested for the scenario are numbers 3 to 10. Gateway, Identity,
@@ -249,7 +249,7 @@ which is harmless for rate limits and velocity rules; failing the payment is not
 |---|---|---|
 | **Cloud SQL for PostgreSQL** | Customers, accounts, ledger, payments, deposits, credentials, cases | Relational data that needs ACID transactions and constraints. Databases: `core_banking` (schemas `ledger`, `account`, `intake`, `deposits`), `identity`, `cases` |
 | **Firestore** | Sessions, login events, fraud alerts, notification inbox, analytics snapshots | Semi-structured, write-heavy, read by key or by one field; no joins needed |
-| **Cloud Storage** | End-of-day reports, Flink job files and checkpoints, function source, Terraform state | Objects |
+| **Cloud Storage** | Customers' KYC documents (private bucket, Identity only), PDF statements, end-of-day reports, Flink job files and checkpoints, function source, Terraform state | Files: written once, read whole, served through the bank's API |
 | **DynaStore** | Rate-limit counters, risk features, signals | See section 6 |
 
 Schema changes are Alembic migrations in each service; ArgoCD runs them as a PreSync
@@ -293,6 +293,33 @@ The same SQL runs in CI on a local Flink mini-cluster with file-backed tables.
   and Dataproc ships the Flink job's logs there too, so one place holds the logs of
   every microservice including the analytics job.
 
+### KYC documents and statements (Cloud Storage)
+
+**KYC documents.** A customer uploads a PAN card and an address proof (JPEG, PNG or
+PDF, at most 5 MB; the type is judged from the file's bytes, never its name). Identity
+stores the file in a private bucket that only its own service account can read, and
+a row with the file's SHA-256 and status in PostgreSQL. A KYC officer opens the
+document through the API (every view is recorded in an append-only table), then
+approves it or rejects it with a reason. When every required document is approved,
+Identity tells Account to verify the customer and their waiting accounts activate. A
+rejected or replaced file is deleted at once: the bucket has no versioning and no
+soft-delete window, so the bank does not keep identity documents it did not accept.
+The same file uploaded by two customers is flagged to the reviewer.
+
+**Statements.** The statement for a completed month is built from the ledger the
+first time it is asked for, stored at `statements/<account>/<yyyy-mm>.pdf` and
+registered with two fingerprints: a SHA-256 over the ledger entries it covers and a
+SHA-256 of the PDF. After that the stored file is served. A holder can re-check a
+statement against the ledger as it is now; anyone holding a PDF can upload it on the
+sign-in page and learn whether the bank issued exactly that file (the answer shows
+only a masked account number). Rendering is deterministic, so a lost file is rebuilt
+byte for byte. Statements for any other date range are built on request and marked
+as not registered.
+
+Files are never linked to from the bucket. They are served through the gateway with
+`Content-Security-Policy: sandbox`, `nosniff` and `no-store`, so an uploaded file
+cannot run anything in the bank's origin.
+
 ## 10. Security
 
 - Passwords are stored as salted scrypt hashes, OTPs as hashes, PAN only as a keyed hash.
@@ -302,7 +329,11 @@ The same SQL runs in CI on a local Flink mini-cluster with file-backed tables.
 - Account history is an append-only hash chain; tampering is detectable.
 - Secrets are generated by Terraform, kept in Secret Manager, and never committed.
 - Least privilege: one database user per service, Workload Identity only where needed,
-  non-root containers, NetworkPolicy around internal services.
+  non-root containers, NetworkPolicy around internal services. Identity has its own
+  Google service account; no other service can read the KYC bucket.
+- The gateway refuses request bodies over 6 MB before they reach a service, limits the
+  one file endpoint that needs no login per client address, and serves the web app with
+  a Content-Security-Policy that allows scripts only from its own origin and forbids framing.
 
 - The web app keeps its session in the browser tab only (`sessionStorage`), so closing
   the tab signs the customer out; it builds every page with DOM text nodes, never by
@@ -343,6 +374,9 @@ Chromium against a running stack and is part of CI.
 - DynaStore's membership is static (the peers are listed in configuration). Adding
   nodes means a rolling restart; anti-entropy then moves the data.
 - SMS is simulated (real SMS in India needs DLT registration); email is optional.
+- Statement PDFs use the built-in Helvetica font, which covers Latin-1: other scripts
+  in a payment note print as "?". Uploaded KYC files are checked by type and size but
+  not scanned for malware.
 - The public endpoint is plain HTTP on a load balancer IP (no domain, so no certificate).
   Browsers only allow the camera on https, so on GCP the QR scanner falls back to
   uploading a picture of the code; it uses the camera in a Codespace or on localhost.

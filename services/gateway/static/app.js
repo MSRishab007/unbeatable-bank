@@ -149,15 +149,18 @@
     return refreshing;
   }
 
-  // opt.accept: extra status codes to hand back instead of throwing; opt.full: return {status, data}.
+  // opt.accept: extra status codes to hand back instead of throwing; opt.full: return {status, data};
+  // opt.blob: return the response as a file. A Blob body is uploaded as the file itself.
   async function api(method, path, body, opt = {}) {
     const s = store.session;
     const headers = { ...(opt.headers || {}) };
-    if (body !== undefined) headers["Content-Type"] = "application/json";
+    const file = body instanceof Blob;                    // a file is sent as it is, not as JSON
+    if (file) headers["Content-Type"] = body.type || "application/octet-stream";
+    else if (body !== undefined) headers["Content-Type"] = "application/json";
     if (s && !opt.anonymous) headers.Authorization = "Bearer " + s.access;
     let res;
     try {
-      res = await fetch(path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
+      res = await fetch(path, { method, headers, body: file ? body : body !== undefined ? JSON.stringify(body) : undefined });
     } catch {
       throw new ApiError(0, "Can't reach the bank. Check your connection and try again.");
     }
@@ -168,6 +171,7 @@
       signOut(true);
       throw new ApiError(401, "Your session ended. Sign in again.");
     }
+    if (opt.blob && res.ok) return res.blob();
     const text = await res.text();
     let data = null;
     if (text) { try { data = JSON.parse(text); } catch { data = text; } }
@@ -219,6 +223,124 @@
   }
   const amountInput = (name, value, extra) => h("div", { class: "amount-input" },
     h("input", { name, inputmode: "decimal", autocomplete: "off", required: true, placeholder: "0.00", value, ...(extra || {}) }));
+
+  // Private files (KYC documents, statements) need the access token, so they are fetched and
+  // shown from memory rather than linked to.
+  async function viewFile(path, title, filename) {
+    const blob = await api("GET", path, undefined, { blob: true });
+    const url = URL.createObjectURL(blob);
+    const d = dialog((close) => h("div", { class: "body" }, h("h2", null, title),
+      blob.type.startsWith("image/")
+        ? h("img", { src: url, alt: title, class: "file-view" })
+        : h("iframe", { src: url, title, class: "file-view pdf" }),
+      h("div", { class: "actions", style: "margin-top:14px" },
+        h("a", { class: "btn quiet", href: url, download: filename || title.toLowerCase().replace(/[^a-z0-9]+/g, "-") + (blob.type === "application/pdf" ? ".pdf" : "") }, "Download"),
+        h("button", { type: "button", onclick: close }, "Close"))));
+    d.classList.add("wide");
+    d.addEventListener("gone", () => URL.revokeObjectURL(url));
+  }
+
+  // Monthly statements for an account, plus a statement for any date range.
+  function statementsPanel(account, listing) {
+    const base = `/api/accounts/${account.account_id}/statements`;
+    const last4 = account.account_number.slice(-4);
+    const rows = listing.periods.map((p) => {
+      const li = h("li", { "data-statement": p.period },
+        h("div", { class: "main" }, h("strong", null, p.label),
+          h("span", { class: "muted small" }, p.issued ? `${p.entry_count} entr${p.entry_count === 1 ? "y" : "ies"}, closing balance ${inr(p.closing_balance)}` : "Not downloaded yet")),
+        h("div", { class: "actions" },
+          h("button", { class: "quiet small", type: "button", onclick: (e) => busy(e.currentTarget, async () => {
+            const r = await get(`${base}/${p.period}/verify`).catch((err) => { if (err.status === 404) throw new Error("Open the statement once first; then it can be checked."); throw err; });
+            toast(r.valid ? `${p.label}: matches the ledger (${r.entry_count} entries) and the file is unchanged`
+              : r.ledger_matches ? `${p.label}: the stored file has been changed` : `${p.label}: the ledger no longer matches this statement`, !r.valid);
+          }) }, "Check"),
+          h("button", { class: "small", type: "button", onclick: (e) => busy(e.currentTarget, async () => {
+            await viewFile(`${base}/${p.period}`, `Statement for ${p.label}`, `statement-${last4}-${p.period}.pdf`);
+            li.querySelector(".muted").textContent = "Downloaded";
+          }) }, "Open")));
+      return li;
+    });
+    const monthStart = listing.business_date.slice(0, 8) + "01";
+    const from = h("input", { type: "date", name: "date_from", value: monthStart > listing.opened_on ? monthStart : listing.opened_on, max: listing.business_date, required: true });
+    const to = h("input", { type: "date", name: "date_to", value: listing.business_date, max: listing.business_date, required: true });
+    const go = h("button", { class: "quiet", type: "submit" }, "Get statement");
+    const form = h("form", { class: "sheet", id: "interim-form", style: "margin-top:16px" },
+      h("h3", { style: "margin-bottom:12px" }, "Any dates"),
+      h("div", { class: "row" }, field("From", from), field("To", to)), go,
+      h("p", { class: "help" }, `Up to one year, ending no later than the bank's date (${day(listing.business_date)}).`));
+    form.addEventListener("submit", (e) => { e.preventDefault(); busy(go, () =>
+      viewFile(`${base}/interim?date_from=${from.value}&date_to=${to.value}`, `Statement ${day(from.value)} to ${day(to.value)}`, `statement-${last4}-${from.value}-to-${to.value}.pdf`)); });
+    rows.slice(6).forEach((li) => { li.hidden = true; });
+    const more = rows.length > 6 && h("button", { class: "link", type: "button", id: "more-statements", style: "margin-top:10px", onclick: (e) => {
+      rows.forEach((li) => { li.hidden = false; }); e.currentTarget.remove();
+    } }, `Show ${rows.length - 6} earlier month${rows.length - 6 > 1 ? "s" : ""}`);
+    return h("div", { id: "statements" },
+      rows.length ? h("div", { class: "sheet flush" }, h("ul", { class: "list" }, rows))
+        : empty("No monthly statements yet", "The first one is ready when this month ends."),
+      more, form);
+  }
+
+  // Anyone holding a statement PDF can ask whether the bank really issued it. No login needed.
+  function checkStatementDialog() {
+    dialog((close) => {
+      const out = h("div", { role: "status", id: "statement-check-result", style: "margin-top:14px" });
+      const file = h("input", { type: "file", accept: "application/pdf,.pdf", id: "statement-file", "aria-label": "Statement PDF" });
+      file.addEventListener("change", async () => {
+        const f = file.files[0];
+        if (!f) return;
+        out.replaceChildren(h("p", { class: "muted" }, "Checking…"));
+        try {
+          const r = await api("POST", "/api/statements/verify", f, { anonymous: true });
+          out.replaceChildren(r.genuine
+            ? h("div", { class: "notice good" }, h("strong", null, "Genuine: Unbeatable Bank issued exactly this file"),
+              `Account ${r.account_number}, ${day(r.date_from)} to ${day(r.date_to)}, closing balance ${inr(r.closing_balance)}, issued ${day(r.issued_on)}.`,
+              r.matches_ledger_now ? "" : " The bank's records for this period have changed since it was issued.")
+            : h("div", { class: "notice bad" }, h("strong", null, "Not recognised"), r.message));
+        } catch (e) { out.replaceChildren(h("div", { class: "notice bad" }, e.message)); }
+      });
+      return h("div", { class: "body" }, h("h2", null, "Check a statement"),
+        h("p", { class: "lead" }, "Upload a statement PDF you were given. We compare it with the files the bank issued; a single changed digit is enough for it to fail."),
+        field("Statement PDF", file), out,
+        h("div", { class: "actions" }, h("button", { class: "quiet", type: "button", onclick: close }, "Close")));
+    });
+  }
+
+  const KYC_FILE_TYPES = ["image/jpeg", "image/png", "application/pdf"];
+  const KYC_HELP = {
+    PAN: "A clear picture of your PAN card.",
+    ADDRESS_PROOF: "Masked Aadhaar (only the last 4 digits showing), passport, voter ID or a utility bill.",
+    PHOTO: "A recent photo of your face.",
+  };
+
+  // Customer: what the bank needs, what was sent, and what staff said about it.
+  function kycPanel(status, onChange) {
+    const rows = status.types.map((t) => {
+      const doc = t.document;
+      const input = h("input", { type: "file", accept: ".jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf", hidden: true, "data-kyc-file": t.doc_type, "aria-label": `Choose a file for ${t.label}` });
+      const pick = h("button", { class: doc?.status === "REJECTED" || !doc ? "small" : "small quiet", type: "button", onclick: () => input.click() },
+        !doc ? "Upload" : doc.status === "REJECTED" ? "Upload again" : "Replace");
+      input.addEventListener("change", () => busy(pick, async () => {
+        const file = input.files[0];
+        input.value = "";
+        if (!file) return;
+        if (!KYC_FILE_TYPES.includes(file.type)) throw new Error("Choose a JPEG or PNG picture, or a PDF.");
+        if (file.size > status.max_bytes) throw new Error(`That file is ${(file.size / 1048576).toFixed(1)} MB. The limit is ${status.max_bytes / 1048576} MB.`);
+        await api("POST", `/api/kyc/documents?doc_type=${t.doc_type}`, file);
+        toast(`${t.label[0].toUpperCase() + t.label.slice(1)} sent for review`);
+        onChange();
+      }));
+      const label = t.label[0].toUpperCase() + t.label.slice(1);
+      return h("li", { "data-kyc": t.doc_type },
+        h("div", { class: "main" }, h("strong", null, label, t.required ? "" : " (optional)"),
+          h("span", { class: "muted small" }, doc?.status === "REJECTED" ? h("span", { style: "color:var(--red)" }, `Not accepted: ${doc.reject_reason}`)
+            : doc ? `Sent ${when(doc.uploaded_at)}` : KYC_HELP[t.doc_type])),
+        h("div", { class: "actions" },
+          doc ? tag({ PENDING: "Being reviewed", APPROVED: "Accepted", REJECTED: "Not accepted" }[doc.status], STATUS_TONE[doc.status]) : t.required && tag("Needed", "warn"),
+          doc?.has_file && h("button", { class: "quiet small", type: "button", onclick: (e) => busy(e.currentTarget, () => viewFile(`/api/kyc/documents/${doc.document_id}/content`, label)) }, "View"),
+          doc?.status !== "APPROVED" && [pick, input]));
+    });
+    return h("div", { class: "sheet flush", id: "kyc-documents" }, h("ul", { class: "list" }, rows));
+  }
 
   // ------------------------------------------------------------------ routing and shell
 
@@ -441,7 +563,9 @@
           [["Duplicate check", "One reference, one payment"], ["Rate limits", "Shared by every server"],
             ["Risk engine", "Scores device, payee and pattern"], ["Double-entry ledger", "Debits always equal credits"],
             ["Stream analytics", "Finds rings and mule accounts"]].map(([a, b]) => h("li", null, h("span", null, a), h("span", null, b))))),
-      h("div", { class: "form" }, h("div", null, tabs), forms[mode]()));
+      h("div", { class: "form" }, h("div", null, tabs), forms[mode](),
+        h("p", { class: "muted small", style: "margin-top:28px" }, "Been given an Unbeatable Bank statement? ",
+          h("button", { class: "link", type: "button", onclick: checkStatementDialog }, "Check it is genuine"))));
   }
 
   // ------------------------------------------------------------------ customer: accounts
@@ -459,8 +583,9 @@
   function kycNotice(me) {
     if (me.kyc_status === "VERIFIED") return null;
     return h("div", { class: "notice" }, h("strong", null, me.kyc_status === "REJECTED" ? "Your KYC was not accepted" : "Your KYC is waiting for the branch"),
-      "You can open accounts now; they become active once a branch officer verifies you. Quote this customer number at the branch: ",
-      h("b", { class: "num" }, me.cif_number), " ", copyBtn(me.cif_number, "Customer number"));
+      "You can open accounts now; they become active once your documents are accepted. ",
+      h("a", { href: "#/security" }, "Upload your documents"), ", or visit a branch and quote customer number ",
+      h("b", { class: "num" }, me.cif_number), ".");
   }
 
   function openAccountDialog() {
@@ -522,8 +647,9 @@
   }
 
   async function viewAccount(accountId) {
-    const [a, bal, entries] = await Promise.all([
+    const [a, bal, entries, statements] = await Promise.all([
       get(`/api/accounts/${accountId}`), get(`/api/accounts/${accountId}/balance`), get(`/api/accounts/${accountId}/transactions?limit=100`),
+      get(`/api/accounts/${accountId}/statements`).catch(() => null),
     ]);
     const active = a.status === "ACTIVE";
     const actions = payable(a) ? [
@@ -577,7 +703,8 @@
       a.status === "FROZEN" && h("div", { class: "notice bad" }, h("strong", null, "This account is frozen"),
         a.freeze_reason ? `Reason: ${a.freeze_reason}. ` : "", "Money can come in but not go out. Contact the branch to have it reviewed."),
       a.status === "PENDING_KYC" && h("div", { class: "notice" }, h("strong", null, "Waiting for KYC"),
-        "This account becomes active when every holder has been verified at the branch."),
+        "This account becomes active when every holder's documents have been accepted. ",
+        h("a", { href: "#/security" }, "Upload your documents")),
       h("div", { class: "grid-2" },
         h("div", { class: "sheet" }, h("dl", { class: "facts" },
           h("dt", null, "Account number"), h("dd", { class: "num" }, groupDigits(a.account_number), " ", copyBtn(a.account_number, "Account number")),
@@ -598,7 +725,9 @@
             h("th", { class: "right" }, "Deposit"), h("th", { class: "right" }, "Balance"))),
           h("tbody", null, rows)))
         : empty("Nothing in the passbook yet", "Deposit cash at the branch or ask someone to pay you.",
-          active && h("a", { class: "btn quiet", href: `#/receive?account=${a.account_id}` }, "Show my QR code"))));
+          active && h("a", { class: "btn quiet", href: `#/receive?account=${a.account_id}` }, "Show my QR code"))),
+      section("Statements", null, statements ? statementsPanel(a, statements)
+        : h("div", { class: "notice" }, "Statements aren't available right now. Try again in a minute.")));
   }
 
   // ------------------------------------------------------------------ customer: payments
@@ -1053,7 +1182,8 @@
   }
 
   async function viewSecurity() {
-    const [me, devices, sessions, logins] = await Promise.all([loadMe(), get("/api/auth/devices"), get("/api/auth/sessions"), get("/api/auth/login-history")]);
+    const [me, devices, sessions, logins, kyc] = await Promise.all([loadMe(), get("/api/auth/devices"), get("/api/auth/sessions"),
+      get("/api/auth/login-history"), get("/api/kyc/documents")]);
     const flags = (l) => [l.new_device && tag("New device", "warn"), l.impossible_travel && tag("Impossible travel", "bad")];
     return page("Security", "Who you are to the bank, and where your account has been used.",
       h("button", { class: "quiet", type: "button", onclick: () => signOut() }, "Sign out"),
@@ -1067,6 +1197,9 @@
         h("dt", null, "Mobile"), h("dd", { class: "num" }, me.phone),
         me.pan_last4 && [h("dt", null, "PAN"), h("dd", { class: "num" }, "•••••" + me.pan_last4)],
         h("dt", null, "Daily transfer limit"), h("dd", { class: "num" }, inr(me.daily_transfer_limit)))),
+      section("Identity documents", h("span", { class: "muted small" }, `JPEG, PNG or PDF, up to ${kyc.max_bytes / 1048576} MB each`),
+        kycPanel(kyc, render),
+        h("p", { class: "muted small", style: "margin-top:10px" }, "Only KYC officers can open these, and every time one does it is recorded. A document we don't accept is deleted straight away.")),
       section("Devices that have signed in", null, h("div", { class: "sheet flush" }, h("ul", { class: "list" }, devices.map((d) =>
         h("li", null, h("div", { class: "main" }, h("strong", null, d.label || "Unnamed device"),
           h("span", { class: "muted small" }, `First seen ${when(d.first_seen)}, last used ${when(d.last_seen)}${d.last_ip ? ` from ${d.last_ip}` : ""}`)),
@@ -1194,15 +1327,43 @@
       });
     }
 
+    const DOC_LABEL = { PAN: "PAN card", ADDRESS_PROOF: "Address proof", PHOTO: "Photograph" };
+
+    // KYC officer: the customer's documents with View, Approve and Reject.
+    function documentsBlock(c, docs) {
+      if (!docs.length) return h("p", { class: "muted small", style: "margin:4px 0 14px" }, "No identity documents uploaded yet.");
+      return h("ul", { class: "list", style: "margin:0 -20px 14px;border-top:1px solid var(--rule);border-bottom:1px solid var(--rule)" }, docs.map((d) =>
+        h("li", { "data-document": d.document_id, "data-doc-type": d.doc_type },
+          h("div", { class: "main" }, h("strong", null, DOC_LABEL[d.doc_type]),
+            h("span", { class: "muted small" }, `${d.content_type === "application/pdf" ? "PDF" : "Picture"}, ${(d.size_bytes / 1024).toFixed(0)} KB, sent ${when(d.uploaded_at)}`,
+              d.decided_by ? `. ${words(d.status)} by ${d.decided_by.split(":")[1]}` : "", d.reject_reason ? `: ${d.reject_reason}` : ""),
+            d.same_file_other_customers > 0 && h("div", null, tag(`Same file also uploaded by ${d.same_file_other_customers} other customer${d.same_file_other_customers > 1 ? "s" : ""}`, "bad"))),
+          h("div", { class: "actions" }, statusTag(d.status),
+            d.has_file && h("button", { class: "quiet small", type: "button", onclick: (e) => busy(e.currentTarget, () =>
+              viewFile(`/api/staff/kyc-documents/${d.document_id}/content`, `${DOC_LABEL[d.doc_type]} of ${c.full_name}`)) }, "View"),
+            d.status === "PENDING" && h("button", { class: "small", type: "button", onclick: (e) => busy(e.currentTarget, async () => {
+              const r = await api("POST", `/api/staff/kyc-documents/${d.document_id}/approve`);
+              toast(r.kyc_verified ? `All documents accepted: ${c.full_name} is verified` : `${DOC_LABEL[d.doc_type]} accepted`); search();
+            }) }, "Approve"),
+            d.status === "PENDING" && h("button", { class: "quiet small danger", type: "button", onclick: () => formDialog({
+              title: `Reject this ${DOC_LABEL[d.doc_type].toLowerCase()}`, submit: "Reject and delete the file", danger: true,
+              lead: "The customer sees your reason and is asked to upload again. The file is deleted.",
+              fields: field("Reason", h("input", { name: "reason", required: true, minlength: 5, maxlength: 300, placeholder: "The picture is too blurred to read" })),
+              onSubmit: async (v) => { await api("POST", `/api/staff/kyc-documents/${d.document_id}/reject`, { reason: v.reason.trim() }); toast("Rejected; the customer has been told"); search(); },
+            }) }, "Reject")))));
+    }
+
     async function customerCard(c) {
-      let accounts = [];
+      let accounts = [], docs = [];
       try { accounts = await get(`/api/staff/customers/${c.customer_id}/accounts`); } catch { /* shown as none */ }
+      if (can("KYC")) { try { docs = await get(`/api/staff/customers/${c.customer_id}/kyc-documents`); } catch { /* shown as none */ } }
       return h("div", { class: "sheet", "data-customer": c.customer_id, style: "margin-bottom:16px" },
         h("div", { class: "section-head" }, h("div", null, h("h3", null, c.full_name), h("span", { class: "muted small num" }, `${c.cif_number}, ${c.email}, ${c.phone}`)),
           h("div", { class: "actions" }, h("span", null, "KYC ", statusTag(c.kyc_status)),
             c.kyc_status !== "VERIFIED" && can("KYC") && h("button", { class: "small", type: "button", onclick: (e) => busy(e.currentTarget, async () => {
               await api("POST", `/api/staff/kyc/${c.customer_id}/verify`); toast(`${c.full_name} is verified`); search();
-            }) }, "Verify KYC"))),
+            }) }, "Verify in person"))),
+        can("KYC") && documentsBlock(c, docs),
         accounts.length ? h("div", { class: "table-wrap" }, h("table", null,
           h("thead", null, h("tr", null, h("th", null, "Account"), h("th", null, "Type"), h("th", null, "Status"), h("th", null, ""))),
           h("tbody", null, accounts.map((a) => h("tr", null, h("td", { class: "num nowrap" }, groupDigits(a.account_number)), h("td", null, PRODUCT[a.product_type] || a.product_type),
@@ -1220,9 +1381,20 @@
       const term = q.value.trim();
       results.replaceChildren(h("p", { class: "skeleton" }, "Searching…"));
       try {
-        const found = await get(term ? `/api/staff/customers?query=${encodeURIComponent(term)}` : "/api/staff/customers?kyc_status=PENDING&limit=20");
+        let found = await get(term ? `/api/staff/customers?query=${encodeURIComponent(term)}` : "/api/staff/customers?kyc_status=PENDING&limit=20");
+        let waiting = [];
+        if (!term && can("KYC")) {
+          // Customers with documents to review come first, oldest upload first.
+          waiting = await get("/api/staff/kyc-queue");
+          const order = [...new Set(waiting.map((d) => d.customer_id))];
+          const known = new Map(found.map((c) => [c.customer_id, c]));
+          const extra = await Promise.all(order.filter((id) => !known.has(id)).map((id) => get(`/api/staff/customers/${id}`).catch(() => null)));
+          extra.filter(Boolean).forEach((c) => known.set(c.customer_id, c));
+          found = [...order.filter((id) => known.has(id)).map((id) => known.get(id)), ...found.filter((c) => !order.includes(c.customer_id))];
+        }
         const cards = await Promise.all(found.map(customerCard));
-        results.replaceChildren(h("h2", { style: "margin-bottom:12px" }, term ? `${found.length} found` : "Waiting for KYC"),
+        results.replaceChildren(h("h2", { style: "margin-bottom:12px", id: "branch-heading" }, term ? `${found.length} found`
+          : waiting.length ? `${waiting.length} document${waiting.length > 1 ? "s" : ""} to review` : "Waiting for KYC"),
           cards.length ? h("div", null, cards) : empty(term ? "No customer matches that" : "No one is waiting", term ? "Try the customer number, full email or mobile with +91." : "New sign-ups appear here until their KYC is verified."));
       } catch (e) { results.replaceChildren(h("div", { class: "notice bad" }, e.message)); }
     }

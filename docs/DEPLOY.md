@@ -102,7 +102,7 @@ load balancer. Data is kept. What remains costs a few cents a day (disks).
 | 6 | `make flink-up`, then `python loadtest/simulator.py http://<ip> --with-flink` | Windowed aggregation on Dataproc, results back on Kafka, mule ring alert (e) |
 | 7 | `make grafana`; Cloud Logging in the console | Metrics and centralised logs, including the Flink job (h) |
 | 8 | Edit a limit in `services/ratelimit/config/policies.yaml`, run `python scripts/gen_manifests.py`, merge | A configuration change rolled out by GitOps |
-| 9 | Console: Cloud SQL, Firestore, Cloud Storage | Three storage products (g) |
+| 9 | Web app: upload KYC documents as a customer, review them as `kyc1`; open a statement and check it on the sign-in page. Console: Cloud SQL, Firestore, the `-kyc` and `-reports` buckets | Three storage products doing real work (g) |
 | 10 | `make down` | Cost control |
 
 To check a deployment from your laptop: `make smoke` (API), `make ui-test` (web app
@@ -115,5 +115,13 @@ the manifests pass schema checks, but none of it had been applied to a real
 project when this was written. Expect to fix small things on the first
 `make up`; the most likely places are the Dataproc submit script
 (`services/audit-analytics/submit.sh`), chart versions in `deploy/argocd/apps`
-and IAM roles for the Cloud Function build. The `e2e` job in CI has only been run by
-hand on a development machine, not yet on GitHub's runners.
+and IAM roles for the Cloud Function build.
+
+Also not yet proven when this was written:
+
+- The CI jobs `compose-e2e` and `adapters` had not run on GitHub's runners. The
+  Firestore and Pub/Sub contract tests in `libs/common/tests` need Google's emulators,
+  which only CI starts; the Cloud Storage, Postgres and in-memory backends were run
+  on a development machine.
+- The KYC bucket's `soft_delete_policy` and the per-service Google service accounts
+  validate, but have not been applied.

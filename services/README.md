@@ -20,14 +20,14 @@ services/<name>/
 | Service | Interfaces | Data | What it does |
 |---|---|---|---|
 | `gateway` | REST (public) | none | Verifies JWTs, checks roles and ownership, routes `/api/...`, serves the web app |
-| `identity` | REST | Postgres `identity`, document store | Sign-up, login, devices, sessions, OTP, staff |
+| `identity` | REST | Postgres `identity`, document store, object store | Sign-up, login, devices, sessions, OTP, staff, KYC documents |
 | `account` | REST | Postgres `core_banking.account` | Customers, accounts, joint holders, limits, freeze, payees, aliases, audit chain |
 | `ledger` | REST + gRPC :50051 | Postgres `core_banking.ledger` | Double-entry journals, balances, holds, interest, reconciliation |
 | `intake` | REST | Postgres `core_banking.intake` | Payment admission pipeline: idempotency, limits, risk decision, OTP, holds |
 | `ratelimit` | REST + gRPC :50052 | DynaStore | Sliding-window rate limits shared by all pods |
 | `risk` | REST + gRPC :50053 | DynaStore | Real-time risk scoring from `config/rules.yaml` |
 | `fraud` | REST, Kafka consumer | Postgres `cases`, document store | Alerts, auto-freeze, cases, maker-checker, customer inbox |
-| `deposits` | REST | Postgres `core_banking.deposits`, object store | FD, RD, rate cards, end-of-day batch, bank calendar |
+| `deposits` | REST | Postgres `core_banking.deposits`, object store | FD, RD, rate cards, end-of-day batch, bank calendar, PDF statements |
 | `dynastore` | REST + gRPC :7000 | local disk (SQLite) | The leaderless key-value store |
 | `audit-analytics` | Flink SQL job | Kafka | Windowed aggregations; see its README |
 

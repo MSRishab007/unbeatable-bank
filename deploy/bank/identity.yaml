@@ -61,6 +61,11 @@ spec:
             secretKeyRef:
               name: bank-secrets
               key: STAFF_BOOTSTRAP
+        - name: GCS_BUCKET
+          valueFrom:
+            configMapKeyRef:
+              name: bank-infra
+              key: KYC_BUCKET
         resources:
           requests:
             cpu: 100m

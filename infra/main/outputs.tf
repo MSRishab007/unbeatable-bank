@@ -29,12 +29,9 @@ output "image_registry" {
   value       = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.images.repository_id}"
 }
 
-output "apps_service_account" {
-  value = google_service_account.apps.email
-}
-
-output "workload_identity_users" {
-  value = local.workload_identity_users
+output "workload_identity" {
+  description = "Kubernetes service account name -> Google service account it acts as"
+  value       = local.workload_identity
 }
 
 output "app_namespace" {
@@ -43,6 +40,10 @@ output "app_namespace" {
 
 output "reports_bucket" {
   value = google_storage_bucket.reports.name
+}
+
+output "kyc_bucket" {
+  value = google_storage_bucket.kyc.name
 }
 
 output "firestore_database" {

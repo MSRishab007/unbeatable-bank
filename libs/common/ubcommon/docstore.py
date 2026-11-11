@@ -167,7 +167,12 @@ class FirestoreDocStore:
 
     def get(self, collection, doc_id):
         snap = self._db.collection(collection).document(doc_id).get()
-        return _from_firestore(snap.id, snap.to_dict()) if snap.exists else None
+        if not snap.exists:
+            return None
+        doc = _from_firestore(snap.id, snap.to_dict())
+        # Firestore's TTL policy deletes expired documents eventually (it can lag by a day),
+        # so an expired document is treated as gone here, like the other backends do.
+        return None if _expired(doc) else doc
 
     def add(self, collection, data):
         _, ref = self._db.collection(collection).add(_to_firestore(data))
@@ -185,11 +190,12 @@ class FirestoreDocStore:
             for field, value in filters.items():
                 query = query.where(filter=FieldFilter(field, "==", value))
             docs = [_from_firestore(s.id, s.to_dict()) for s in query.limit(self.FETCH_CAP).stream()]
-            return _sorted(docs, order_by, descending, limit)
+            return _sorted([d for d in docs if not _expired(d)], order_by, descending, limit)
         if order_by:
             direction = firestore.Query.DESCENDING if descending else firestore.Query.ASCENDING
             query = query.order_by(order_by, direction=direction)
-        return [_from_firestore(s.id, s.to_dict()) for s in query.limit(limit).stream()]
+        docs = [_from_firestore(s.id, s.to_dict()) for s in query.limit(limit).stream()]
+        return [d for d in docs if not _expired(d)]
 
 
 def get_docstore() -> DocStore:

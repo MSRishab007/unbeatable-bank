@@ -12,7 +12,7 @@ CI fails if the committed manifests don't match this script.
 What is NOT in Git (created by Terraform, infra/platform, because the values
 are project-specific or secret):
     Secret bank-secrets        database URLs, JWT secret, staff logins
-    ConfigMap bank-infra       GCP project, bucket and Firestore names
+    ConfigMap bank-infra       GCP project, bucket names and Firestore database
     ServiceAccounts identity, fraud, deposits   (bound to a Google service account)
 """
 
@@ -63,10 +63,12 @@ COMMON_ENV = {
 #   hpa       (min, max) replicas, scaling on 60% CPU
 #   config    folder under services/<name>/ mounted read-only at /srv/config
 #   gcp       uses a Kubernetes ServiceAccount bound to a Google service account (created by Terraform)
+#   infra     env name -> key in ConfigMap bank-infra (overrides the value envFrom would give)
 #   public    exposed to the internet through a LoadBalancer
 SERVICES: dict[str, dict] = {
     "gateway": {"secrets": ["JWT_SECRET"], "hpa": (1, 4), "public": True, "env": {"ALLOW_SIM_HEADERS": "true"}},
-    "identity": {"db": True, "outbox": True, "secrets": ["JWT_SECRET", "STAFF_BOOTSTRAP"], "gcp": True},
+    "identity": {"db": True, "outbox": True, "secrets": ["JWT_SECRET", "STAFF_BOOTSTRAP"], "gcp": True,
+                 "infra": {"GCS_BUCKET": "KYC_BUCKET"}},       # its bucket is the KYC one, not the reports one
     "account": {"db": True, "outbox": True},
     "ledger": {"db": True, "outbox": True, "grpc": 50051, "env": {"GRPC_PORT": "50051"}},
     "intake": {"db": True, "outbox": True, "hpa": (1, 6)},
@@ -107,6 +109,8 @@ def env_for(name: str, spec: dict) -> list[dict]:
     if spec.get("db"):
         env.append(secret_env("DATABASE_URL", f"DATABASE_URL_{name.upper()}"))
     env += [secret_env(key, key) for key in spec.get("secrets", [])]
+    env += [{"name": k, "valueFrom": {"configMapKeyRef": {"name": "bank-infra", "key": key}}}
+            for k, key in spec.get("infra", {}).items()]
     return env
 
 

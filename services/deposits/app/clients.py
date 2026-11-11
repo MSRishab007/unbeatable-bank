@@ -9,7 +9,7 @@ from uuid import UUID
 
 import httpx
 
-from .service import LedgerRejected, Unavailable
+from .service import DepositError, LedgerRejected, NotFound, Unavailable
 
 ACTOR = {"X-Actor": "system:deposits"}
 
@@ -52,6 +52,15 @@ class HttpLedger(_Http):
     def reconciliation(self) -> dict:
         return self._request("GET", "/v1/reconciliation").json()
 
+    def statement(self, account_id: UUID, date_from: date, date_to: date) -> dict:
+        r = self._request("GET", f"/v1/accounts/{account_id}/statement",
+                          params={"date_from": date_from.isoformat(), "date_to": date_to.isoformat()})
+        if r.status_code == 404:
+            raise NotFound("account not found")
+        if r.status_code >= 400:
+            raise DepositError(r.json().get("message", "the ledger refused the statement request"))
+        return r.json()
+
 
 class HttpAccounts(_Http):
     def __init__(self, base_url: str | None = None) -> None:
@@ -70,3 +79,9 @@ class HttpAccounts(_Http):
     def date_of_birth(self, customer_id: UUID) -> date | None:
         r = self._request("GET", f"/v1/customers/{customer_id}")
         return date.fromisoformat(r.json()["date_of_birth"]) if r.status_code == 200 else None
+
+    def account(self, account_id: UUID) -> dict:
+        r = self._request("GET", f"/v1/accounts/{account_id}", headers=ACTOR)
+        if r.status_code != 200:
+            raise NotFound("account not found")
+        return r.json()

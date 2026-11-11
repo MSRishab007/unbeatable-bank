@@ -89,7 +89,7 @@ class AccountsClient(Protocol):
     def create_customer(self, profile: dict) -> dict:
         """Returns the customer, or raises Conflict / IdentityError."""
 
-    def verify_kyc(self, customer_id: UUID) -> None: ...
+    def verify_kyc(self, customer_id: UUID, actor: str = "system:identity") -> None: ...
 
 
 class Signals(Protocol):
@@ -112,6 +112,7 @@ class Deps:
     session_ttl: int = 7 * 86400
     auto_verify_kyc: bool = False
     clock: Callable[[], float] = field(default=time.time)
+    objstore: Any = None            # ubcommon.objstore.ObjectStore: where KYC files are kept
 
 
 def _cur(conn: psycopg.Connection) -> psycopg.Cursor:

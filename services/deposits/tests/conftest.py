@@ -47,7 +47,7 @@ def pool(db_url):
 def conn(pool):
     with pool.connection() as c:
         # Every test starts from an empty bank on the same business date.
-        c.execute("TRUNCATE deposits.rd_installments, deposits.deposits, deposits.eod_runs, ledger.accrual_runs, "
+        c.execute("TRUNCATE deposits.statements, deposits.rd_installments, deposits.deposits, deposits.eod_runs, ledger.accrual_runs, "
                   "ledger.outbox, ledger.holds, ledger.entries, ledger.journals, ledger.balances CASCADE")
         c.execute("INSERT INTO ledger.balances (account_id, kind, product_type) "
                   "SELECT ('00000000-0000-0000-0000-00000000000' || n)::uuid, 'INTERNAL', 'INTERNAL' "
@@ -92,11 +92,18 @@ class RealLedger:
         with self.pool.connection() as c:
             return self.posting.reconcile(c)
 
+    def statement(self, account_id, date_from, date_to):
+        try:
+            with self.pool.connection() as c:
+                return self.posting.statement(c, account_id, date_from, date_to)
+        except self.posting.AccountNotFound as e:
+            raise service.NotFound("account not found") from e
+
 
 class FakeAccounts:
     def __init__(self, posting, pool):
         self.posting, self.pool = posting, pool
-        self.owners, self.dob, self.serial = {}, {}, 0
+        self.owners, self.dob, self.serial, self.opened = {}, {}, 0, {}
 
     def customer(self, born=date(1995, 6, 15)):
         cid = uuid.uuid4()
@@ -116,8 +123,16 @@ class FakeAccounts:
     def authorize(self, account_id, customer_id):
         owner = self.owners.get(account_id)
         if owner is None or owner[0] != customer_id:
-            return {"allowed": False, "reason": "NOT_A_HOLDER"}
-        return {"allowed": True, "product_type": owner[1]}
+            return {"allowed": False, "reason": "NOT_A_HOLDER", "is_holder": False}
+        return {"allowed": True, "product_type": owner[1], "is_holder": True}
+
+    def account(self, account_id):
+        owner = self.owners.get(account_id)
+        if owner is None:
+            raise service.NotFound("account not found")
+        return {"account_id": str(account_id), "account_number": "5001" + str(account_id.int)[-8:],
+                "product_type": owner[1], "opened_at": self.opened.get(account_id, "2025-11-20T10:00:00+00:00"),
+                "holders": [{"full_name": "Riya Sharma", "role": "PRIMARY"}]}
 
     def open_deposit_account(self, account_id, product, customer_id):
         with self.pool.connection() as c:

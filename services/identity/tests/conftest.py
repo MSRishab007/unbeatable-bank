@@ -10,6 +10,7 @@ from psycopg_pool import ConnectionPool
 
 from ubcommon.docstore import MemoryDocStore
 from ubcommon.notify import get_notifier
+from ubcommon.objstore import LocalObjectStore
 
 from app import service
 
@@ -53,8 +54,11 @@ class FakeAccounts:
         self.customers[profile["customer_id"]] = profile
         return {**profile, "cif_number": f"CIF{len(self.customers):09d}"}
 
-    def verify_kyc(self, customer_id):
+    def verify_kyc(self, customer_id, actor="system:identity"):
+        if self.fail:
+            raise self.fail
         self.verified.append(str(customer_id))
+        self.verified_by = actor
 
 
 class FakeSignals:
@@ -78,10 +82,11 @@ class Clock:
 
 
 @pytest.fixture
-def deps():
+def deps(tmp_path):
     docstore = MemoryDocStore()
     return service.Deps(accounts=FakeAccounts(), docstore=docstore, notifier=get_notifier(docstore),
-                        jwt_secret="test-secret", signals=FakeSignals(), clock=Clock())
+                        jwt_secret="test-secret", signals=FakeSignals(), clock=Clock(),
+                        objstore=LocalObjectStore(str(tmp_path / "objects")))
 
 
 @pytest.fixture

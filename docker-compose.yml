@@ -175,6 +175,7 @@ services:
       <<: *env
       DATABASE_URL: postgresql://identity_svc:identity_dev@postgres:5432/identity
       STAFF_BOOTSTRAP: "admin:ADMIN:admin-dev-pass,analyst1:ANALYST:analyst-dev-pass,analyst2:ANALYST:analyst-dev-pass,teller1:TELLER:teller-dev-pass,kyc1:KYC:kyc-dev-pass"
+    volumes: ["kyc:/data/objects"]       # KYC documents (a private Cloud Storage bucket in GCP)
     depends_on:
       account: {condition: service_healthy}
       ratelimit: {condition: service_healthy}
@@ -289,3 +290,4 @@ volumes:
   dyna1:
   dyna2:
   objects:
+  kyc:

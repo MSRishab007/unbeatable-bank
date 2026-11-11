@@ -121,7 +121,7 @@ jobs:
           pip install -e "libs/common[kafka]"
           cat services/*/requirements.txt | sort -u > /tmp/requirements.txt
           pip install -r /tmp/requirements.txt httpx playwright
-          playwright install --with-deps chromium
+          bash scripts/ci_install_browser.sh
       - name: Create the databases
         run: |
           docker exec ${{ job.services.postgres.id }} psql -U postgres -c "ALTER SYSTEM SET max_connections = 300"
@@ -216,7 +216,7 @@ jobs:
           # kafka-init is a one-shot job; everything else must be up.
           diff <(docker compose config --services | grep -v '^kafka-init$' | sort) \
                <(docker compose ps --services --status running | sort)
-      - run: pip install httpx playwright && playwright install --with-deps chromium
+      - run: pip install httpx playwright && bash scripts/ci_install_browser.sh
       - name: API smoke test
         run: python scripts/smoke_test.py
       - name: Fraud personas

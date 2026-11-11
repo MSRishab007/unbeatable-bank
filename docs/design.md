@@ -37,7 +37,7 @@ Keeping those two kinds of data apart, and saying why, is the central design dec
 
 | Req. | How it is met | Where |
 |---|---|---|
-| 8+ microservices, one public | 12 services; the API Gateway is public behind a load balancer | `services/`, `functions/` |
+| 8+ microservices, one public | 12 services; the API Gateway is public behind a load balancer and Traefik (HTTPS) | `services/`, `functions/` |
 | (a) IaC | Terraform, three layers: bootstrap (project, IAM, state, budgets), main (network, GKE, Cloud SQL, Firestore, GCS, Pub/Sub, function, Dataproc, IAM, secrets), platform (in-cluster secrets, ArgoCD) | `infra/` |
 | (b) Serverless | Notification Service is a Cloud Function (2nd gen), triggered asynchronously by Pub/Sub | `functions/notification`, `infra/main/function.tf` |
 | (b) REST, gRPC, queues | REST: client to gateway, gateway to services, service to service. gRPC: Intake to Ledger, Rate Limit, Risk; all DynaStore traffic. Queues: Kafka (events), Pub/Sub (notifications) | `proto/`, section 5 |
@@ -345,10 +345,11 @@ cannot run anything in the bank's origin.
 - Least privilege: one database user per service, Workload Identity only where needed,
   non-root containers, NetworkPolicy around internal services. Identity has its own
   Google service account; no other service can read the KYC bucket.
-- The only thing exposed to the internet is the edge proxy (Caddy) behind one load
-  balancer: HTTPS with Let's Encrypt certificates for the bank's DuckDNS names, HTTP
-  redirected to HTTPS, HSTS. It overwrites X-Forwarded-For with the caller's address, and
-  the gateway trusts only that last entry, so a client can't fake its IP for rate limits.
+- The only thing exposed to the internet is Traefik behind one Google load balancer
+  (2-4 pods, autoscaled): HTTPS with a Let's Encrypt certificate from cert-manager for the
+  bank's DuckDNS names, HTTP redirected to HTTPS, HSTS. It replaces X-Forwarded-For with
+  the caller's address, and the gateway trusts only that last entry, so a client can't
+  fake its IP for rate limits.
 - The gateway refuses request bodies over 6 MB before they reach a service, limits the
   one file endpoint that needs no login per client address, and serves the web app with
   a Content-Security-Policy that allows scripts only from its own origin and forbids framing.
@@ -395,7 +396,8 @@ Chromium against a running stack and is part of CI.
 - Statement PDFs use the built-in Helvetica font, which covers Latin-1: other scripts
   in a payment note print as "?". Uploaded KYC files are checked by type and size but
   not scanned for malware.
-- The public endpoint is plain HTTP on a load balancer IP (no domain, so no certificate).
-  Browsers only allow the camera on https, so on GCP the QR scanner falls back to
-  uploading a picture of the code; it uses the camera in a Codespace or on localhost.
+- The public names are free DuckDNS subdomains that follow a changing load balancer IP,
+  so for a minute or two after `make up` the name may still point at the old IP. By bare
+  IP the bank is plain HTTP (no certificate exists for an IP); there the QR scanner falls
+  back to uploading a picture, because browsers allow the camera only on https.
 - The service-to-service trust model relies on network isolation rather than mTLS.

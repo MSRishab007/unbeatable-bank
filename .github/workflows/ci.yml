@@ -33,12 +33,12 @@ jobs:
           python-version: "3.12"
       - run: pip install pyyaml
       - run: python scripts/gen_manifests.py
-      - run: git diff --exit-code -- deploy/bank
+      - run: git diff --exit-code -- deploy/bank deploy/edge && test -z "$(git status --porcelain -- deploy/bank deploy/edge)"
       - name: Validate Kubernetes manifests
         run: |
           curl -sSfL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
           CRDS='https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
-          for dir in deploy/bank deploy/kafka deploy/monitoring; do
+          for dir in deploy/bank deploy/edge deploy/kafka deploy/monitoring; do
             kubectl kustomize "$dir" | ./kubeconform -strict -summary -schema-location default -schema-location "$CRDS" -
           done
 

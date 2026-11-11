@@ -1,0 +1,66 @@
+# Traefik: the bank's front door. Its Service is the one Google load balancer (public IP);
+# the load balancer spreads requests over 2-4 Traefik pods (autoscaled), which terminate
+# HTTPS and pass requests to the gateway Service, which spreads them over the gateway pods.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: traefik
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://traefik.github.io/charts
+    chart: traefik
+    targetRevision: 41.1.0
+    helm:
+      valuesObject:
+        deployment:
+          replicas: null          # the autoscaler owns the replica count
+        autoscaling:
+          enabled: true
+          minReplicas: 2          # two, so one pod or node can fail without an outage
+          maxReplicas: 4
+          metrics:
+            - type: Resource
+              resource:
+                name: cpu
+                target: { type: Utilization, averageUtilization: 60 }
+        podDisruptionBudget:
+          enabled: true
+          minAvailable: 1
+        # Spread the pods over different nodes.
+        topologySpreadConstraints:
+          - maxSkew: 1
+            topologyKey: kubernetes.io/hostname
+            whenUnsatisfiable: ScheduleAnyway
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: traefik
+        resources:
+          requests: { cpu: 100m, memory: 64Mi }
+          limits: { memory: 256Mi }
+        service:
+          spec:
+            type: LoadBalancer
+            # Requests reach a Traefik pod without being forwarded via another node, so
+            # Traefik sees (and passes on in X-Forwarded-For) the caller's real address.
+            externalTrafficPolicy: Local
+        ingressClass:
+          enabled: true
+          isDefaultClass: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: traefik
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 20
+      backoff:
+        duration: 20s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

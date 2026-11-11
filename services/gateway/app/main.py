@@ -128,7 +128,7 @@ def client_ip(request: Request) -> str:
         return request.headers["x-sim-ip"]
     forwarded = request.headers.get("x-forwarded-for", "")
     if forwarded:
-        # The edge proxy (Caddy) appends the address it saw the request come from. Anything
+        # The edge proxy (Traefik) appends the address it saw the request come from. Anything
         # before that was written by the caller and can't be trusted, so only the last entry counts.
         return forwarded.split(",")[-1].strip()
     return request.client.host if request.client else ""

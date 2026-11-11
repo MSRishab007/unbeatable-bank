@@ -39,7 +39,7 @@ spec:
         ports:
         - name: http
           containerPort: 8080
-        envFrom: &id001
+        envFrom:
         - configMapRef:
             name: bank-env
         - configMapRef:
@@ -56,7 +56,7 @@ spec:
             memory: 160Mi
           limits:
             memory: 512Mi
-        securityContext: &id002
+        securityContext:
           allowPrivilegeEscalation: false
           capabilities:
             drop:
@@ -87,7 +87,11 @@ spec:
         - ubcommon.outbox
         - --schema
         - intake
-        envFrom: *id001
+        envFrom:
+        - configMapRef:
+            name: bank-env
+        - configMapRef:
+            name: bank-infra
         env:
         - name: DATABASE_URL
           valueFrom:
@@ -105,7 +109,11 @@ spec:
             memory: 64Mi
           limits:
             memory: 192Mi
-        securityContext: *id002
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
 ---
 apiVersion: v1
 kind: Service

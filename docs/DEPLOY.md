@@ -86,10 +86,21 @@ make smoke           # staff passwords are read from infra/main/terraform.tfvars
 The load balancer gets a new IP after every `make up`. Two free DuckDNS names follow it:
 **https://unbeatable-bank.duckdns.org** and **https://ubank.duckdns.org**.
 
-- **Edge:** Caddy (`deploy/bank/edge.yaml`, generated) sits behind the only load balancer.
-  It gets a free Let's Encrypt certificate for each name, keeps it on a 1 GB disk (so
-  `make down` / `make up` don't re-issue it), sends `http://` to `https://`, and passes
-  requests to the gateway. By bare IP the bank is plain HTTP (no certificate exists for an IP).
+- **The way in:**
+
+  ```
+  internet -> Google load balancer (the one public IP)
+           -> Traefik pods (2-4, autoscaled, on different nodes)   ArgoCD app "traefik"
+           -> gateway Service -> gateway pods (1-4, autoscaled)    ArgoCD app "bank"
+  ```
+
+  Traefik terminates HTTPS, sends `http://<name>` to `https://`, and passes requests to the
+  gateway. By bare IP the bank is plain HTTP (no certificate exists for an IP).
+- **Certificate:** cert-manager (ArgoCD app "cert-manager") gets one free Let's Encrypt
+  certificate for both names and keeps it in the Secret `bank/bank-tls`, which every Traefik
+  pod reads. It is kept across `make down` / `make up` and renewed 30 days before expiry.
+  The routes and the certificate request are in `deploy/edge` (ArgoCD app "edge", generated
+  by `scripts/gen_manifests.py`). `make status` shows whether the certificate is Ready.
 - **Names:** the `dns-updater` CronJob checks every 2 minutes and points both names at the
   load balancer's current IP. `make dns` runs it at once.
 - **Setup, once:** sign in at https://www.duckdns.org with the account that owns both

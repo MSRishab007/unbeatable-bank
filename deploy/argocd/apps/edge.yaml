@@ -1,0 +1,29 @@
+# The bank's public names: certificate, HTTPS routes through Traefik, the DuckDNS updater.
+# Generated into deploy/edge by scripts/gen_manifests.py.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: edge
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/MSRishab007/unbeatable-bank.git
+    targetRevision: main
+    path: deploy/edge
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: bank
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 20
+      backoff:
+        duration: 20s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      # The cert-manager and Traefik CRDs arrive with their apps; keep retrying until they exist.
+      - SkipDryRunOnMissingResource=true

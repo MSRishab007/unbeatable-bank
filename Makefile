@@ -13,7 +13,8 @@ ZONE         ?= us-central1-a
 NODES        ?= 2
 TF_MAIN      = terraform -chdir=infra/main
 TF_PLATFORM  = terraform -chdir=infra/platform
-GATEWAY_IP   = $(shell kubectl -n bank get service edge -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+# The one public load balancer is Traefik's Service (ArgoCD app "traefik", see deploy/argocd/apps).
+GATEWAY_IP   = $(shell kubectl -n traefik get service traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
 # The bank's public name (DuckDNS, kept pointing at the load balancer by the dns-updater
 # CronJob once duckdns_token is in infra/main/terraform.tfvars). Without a token: the bare IP.
 BANK_HOST    ?= unbeatable-bank.duckdns.org
@@ -46,13 +47,18 @@ up: init ## start the cluster, database and all services
 	$(TF_MAIN) apply -auto-approve -var node_count=$(NODES) -var sql_running=true
 	$(MAKE) kubeconfig
 	$(TF_PLATFORM) apply -auto-approve -var state_bucket=$(STATE_BUCKET)
+	@# `make down` pauses ArgoCD (see there); start it again.
+	-kubectl -n argocd scale statefulset argocd-application-controller --replicas=1
 	@echo "ArgoCD is now deploying from Git. Watch with: make status    Public URL: make url"
 	@echo "The DuckDNS name follows the new IP within ~2 minutes of the load balancer getting one."
 
 down: check-project ## stop everything that costs money (data is kept)
-	@# The load balancer bills even with zero nodes, so remove it first. ArgoCD recreates it on `make up`.
-	@# (The edge's disk with the HTTPS certificates stays, so they aren't issued again.)
-	-kubectl -n bank delete service edge gateway-public --ignore-not-found --timeout=120s
+	@# The load balancer bills even with zero nodes, so remove it first. ArgoCD would put it straight
+	@# back (self-heal), so pause ArgoCD first; `make up` starts it again and it recreates the Service.
+	@# The HTTPS certificate is a Secret in the cluster, so it is kept and not issued again.
+	-kubectl -n argocd scale statefulset argocd-application-controller --replicas=0
+	-kubectl -n traefik delete service traefik --ignore-not-found --timeout=180s
+	-kubectl -n bank delete service gateway-public edge --ignore-not-found --timeout=120s
 	$(TF_MAIN) apply -auto-approve -var node_count=0 -var sql_running=false -var flink_enabled=false
 
 flink-up: check-project ## create the Dataproc cluster and start the Flink job (~$0.20/hour extra)
@@ -65,7 +71,7 @@ kubeconfig: check-project ## point kubectl at the cluster
 	gcloud container clusters get-credentials ub-cluster --zone $(ZONE) --project $(PROJECT)
 
 url: ## print the public URL of the bank, and whether its DNS name has caught up
-	@test -n "$(GATEWAY_IP)" || { echo "No public IP yet. Check: kubectl -n bank get service edge"; exit 0; }; \
+	@test -n "$(GATEWAY_IP)" || { echo "No public IP yet. Check: kubectl -n traefik get service traefik"; exit 0; }; \
 	echo "by IP (plain HTTP):  http://$(GATEWAY_IP)"; \
 	for h in $(BANK_HOST) ubank.duckdns.org; do \
 	  ip=$$(getent hosts $$h 2>/dev/null | awk '{print $$1}'); \
@@ -77,9 +83,11 @@ dns: ## point the DuckDNS names at the load balancer now, instead of waiting for
 	@job=dns-now-$$(date +%s); kubectl -n bank create job $$job --from=cronjob/dns-updater && \
 	kubectl -n bank wait --for=condition=complete job/$$job --timeout=60s; kubectl -n bank logs job/$$job
 
-status: ## what ArgoCD has deployed, pods and autoscalers
+status: ## what ArgoCD has deployed, pods and autoscalers, the HTTPS certificate
 	@kubectl -n argocd get applications 2>/dev/null || true
 	@kubectl -n bank get pods,hpa
+	@kubectl -n traefik get pods,hpa,service 2>/dev/null || true
+	@kubectl -n bank get certificate bank-tls 2>/dev/null || true
 
 argocd: ## open the ArgoCD UI on http://localhost:8081 (user: admin)
 	@echo "password: $$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d)"

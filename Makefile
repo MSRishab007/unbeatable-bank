@@ -58,6 +58,9 @@ down: check-project ## stop everything that costs money (data is kept)
 	@# The HTTPS certificate is a Secret in the cluster, so it is kept and not issued again.
 	-kubectl -n argocd scale statefulset argocd-application-controller --replicas=0
 	-kubectl -n traefik delete service traefik --ignore-not-found --timeout=180s
+	@# Traefik's disruption budget keeps one pod running at all times, which would hold up
+	@# removing the last node for up to an hour. ArgoCD restores it on `make up`.
+	-kubectl -n traefik delete poddisruptionbudget traefik --ignore-not-found
 	-kubectl -n bank delete service gateway-public edge --ignore-not-found --timeout=120s
 	$(TF_MAIN) apply -auto-approve -var node_count=0 -var sql_running=false -var flink_enabled=false
 

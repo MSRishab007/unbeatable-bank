@@ -42,7 +42,7 @@ Keeping those two kinds of data apart, and saying why, is the central design dec
 | (b) Serverless | Notification Service is a Cloud Function (2nd gen), triggered asynchronously by Pub/Sub | `functions/notification`, `infra/main/function.tf` |
 | (b) REST, gRPC, queues | REST: client to gateway, gateway to services, service to service. gRPC: Intake to Ledger, Rate Limit, Risk; all DynaStore traffic. Queues: Kafka (events), Pub/Sub (notifications) | `proto/`, section 5 |
 | (c) Managed K8s + HPA | GKE; HPAs on gateway, intake and risk (CPU 60%); k6 load test | `deploy/bank`, `loadtest/payments.js` |
-| (d) GitOps | ArgoCD app-of-apps tracks this repository; releases are Git commits made by CI | `deploy/argocd`, `.github/workflows/release.yml` |
+| (d) GitOps | ArgoCD app-of-apps tracks `main`; CI builds images and opens a deploy pull request, and merging it is the release | `deploy/argocd`, `.github/workflows/release.yml` |
 | (e) Flink on managed cluster | Flink SQL job on Dataproc: Kafka `txn-events` in, tumbling/hopping windows, results to `analytics-results` and `risk-signals` | `services/audit-analytics`, `infra/main/dataproc.tf` |
 | (f) Concept | DynaStore: consistent hashing, N/R/W quorums, vector clocks, CRDT counters, sloppy quorum, hinted handoff, read repair, anti-entropy | `services/dynastore`, section 6 |
 | (g) Three storage products | Cloud SQL (PostgreSQL), Firestore, Cloud Storage (plus DynaStore itself) | section 7 |
@@ -89,7 +89,7 @@ flowchart TB
     end
 
     gh[GitHub repo + Actions] -->|images| ar
-    gh -->|Git commit = release| argo
+    gh -->|merged deploy PR = release| argo
     argo -->|sync| bank
     tf[Terraform] -.provisions.-> gcp
 ```

@@ -1,8 +1,13 @@
 name: Release
 
-# Builds every service image, pushes it to Artifact Registry and writes the new
-# image tag into deploy/bank/kustomization.yaml. ArgoCD sees that commit and
-# rolls the pods: the deployment itself is done by GitOps, not by this workflow.
+# Builds every service image, pushes it to Artifact Registry and opens a pull
+# request that writes the new image tag into deploy/bank/kustomization.yaml.
+# Merging that pull request is the deployment: ArgoCD sees the change on main and
+# rolls the pods. Nothing is deployed by this workflow itself (GitOps), and main
+# can stay protected (changes only through pull requests).
+#
+# One-time setting for the pull request: Settings -> Actions -> General ->
+#   "Allow GitHub Actions to create and approve pull requests" (on).
 #
 # One-time setup (Settings -> Secrets and variables -> Actions -> Variables):
 #   GCP_PROJECT_ID      e.g. unbeatable-bank-12
@@ -65,7 +70,10 @@ jobs:
     needs: images
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write          # push the deploy/<sha> branch
+      pull-requests: write     # open the pull request
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -76,12 +84,32 @@ jobs:
       - run: pip install pyyaml
       - name: Point the manifests at the new images
         run: python scripts/gen_manifests.py --registry "$REGISTRY" --tag "${{ github.sha }}"
-      - name: Commit (this commit is what ArgoCD deploys)
+      - name: Open the deploy pull request (merging it is what ArgoCD deploys)
         run: |
+          short="${GITHUB_SHA::7}"
+          branch="deploy/$short"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add deploy/bank
-          git diff --cached --quiet && { echo "nothing to deploy"; exit 0; }
-          git commit -m "deploy: ${GITHUB_SHA::7} [skip ci]"
-          git pull --rebase origin main
-          git push origin HEAD:main
+          if git diff --cached --quiet; then echo "Images are already deployed: nothing to change."; exit 0; fi
+          git switch -c "$branch"
+          git commit -m "deploy: $short"
+          git push --force origin "$branch"
+
+          # An older release that was never merged is out of date now: close it.
+          for old in $(gh pr list --state open --json headRefName --jq '.[] | select(.headRefName | startswith("deploy/")) | .headRefName'); do
+            [ "$old" = "$branch" ] || gh pr close "$old" --delete-branch --comment "Superseded by $branch."
+          done
+
+          if gh pr view "$branch" --json state --jq .state 2>/dev/null | grep -q OPEN; then
+            echo "Pull request for $branch already open."
+          else
+            gh pr create --base main --head "$branch" --title "deploy: $short" --body "$(printf '%s\n' \
+              "Images built from $GITHUB_SHA are in Artifact Registry." \
+              "" \
+              "Merging this pull request deploys them: ArgoCD applies \`deploy/bank\` from \`main\`." \
+              "Only image tags change here; the code itself was reviewed when it was merged." \
+              "" \
+              "Build: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")"
+          fi
+          echo "### Merge the pull request \`deploy: $short\` to deploy" >> "$GITHUB_STEP_SUMMARY"

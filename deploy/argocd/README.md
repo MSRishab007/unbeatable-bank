@@ -12,6 +12,7 @@ created by ArgoCD from Git. Nobody runs `kubectl apply`.
 | `monitoring` | kube-prometheus-stack Helm chart | Prometheus, Grafana, kube-state-metrics, node exporter |
 | `dashboards` | `deploy/monitoring` | The Grafana dashboard |
 
-A release is a Git commit: the release workflow builds the images and writes
-the new tag into `deploy/bank/kustomization.yaml`; ArgoCD notices and rolls
-the pods. To roll back, revert that commit.
+A release is a merged pull request: the release workflow builds the images and
+opens a pull request `deploy: <sha>` that writes the new tag into
+`deploy/bank/kustomization.yaml`. When someone merges it, ArgoCD notices the change
+on `main` and rolls the pods. To roll back, revert that merge.

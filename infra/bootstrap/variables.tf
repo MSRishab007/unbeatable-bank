@@ -41,14 +41,14 @@ variable "team_members" {
   default     = {}
 }
 
-variable "budget_amount_usd" {
-  description = "Credit per billing account."
+variable "budget_amount" {
+  description = "Credit per billing account, in budget_currency (e.g. 50 USD, or about 4300 INR)."
   type        = number
   default     = 50
 }
 
 variable "budget_alert_thresholds" {
-  description = "Fractions of budget_amount_usd that trigger an email. 0.3/0.6/0.8 of $50 = $15/$30/$40."
+  description = "Fractions of budget_amount that trigger an email. 0.3/0.6/0.8 of $50 = $15/$30/$40."
   type        = list(number)
   default     = [0.3, 0.6, 0.8]
 }
@@ -70,4 +70,22 @@ variable "labels" {
   default = {
     team = "unbeatable-bank"
   }
+}
+
+variable "budget_currency" {
+  description = "Currency of the billing accounts (gcloud billing accounts describe ID --format='value(currencyCode)'). Google rejects a budget in any other currency."
+  type        = string
+  default     = "USD"
+}
+
+variable "budget_currencies" {
+  description = "Member key -> currency, for billing accounts whose currency differs from budget_currency."
+  type        = map(string)
+  default     = {}
+}
+
+variable "budget_amounts" {
+  description = "Member key -> credit in that account's currency, for accounts that differ from budget_amount."
+  type        = map(number)
+  default     = {}
 }

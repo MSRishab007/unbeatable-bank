@@ -27,6 +27,11 @@ cp terraform.tfvars.example terraform.tfvars     # project id, billing account(s
 terraform init && terraform apply
 ```
 
+If you are signed in with a university or company Google account, the project is
+created inside that organization: set `org_id` in `terraform.tfvars` to
+`gcloud projects describe <project_id> --format="value(parent.id)"`, and check that
+`terraform plan` says "No changes". The organization's policies apply to the project.
+
 Then move the state into the bucket it created, as described in
 `infra/bootstrap/README.md`. Note the outputs `github_wif_provider` and
 `github_ci_service_account`.
@@ -52,13 +57,21 @@ In the repository: **Settings → Secrets and variables → Actions → Variable
 | `WIF_PROVIDER` | output `github_wif_provider` from step 1 |
 | `CI_SERVICE_ACCOUNT` | output `github_ci_service_account` from step 1 |
 
-Then **Actions → Release → Run workflow**. It builds the ten images, pushes
-them to Artifact Registry and commits the image tag to
-`deploy/bank/kustomization.yaml`. ArgoCD deploys that commit. From now on every
-merge to `main` that touches service code does the same.
+Also in **Settings → Actions → General**:
 
-If `main` is protected, allow the `github-actions` bot to push to it (or the
-release commit will be rejected).
+- **Workflow permissions:** "Read and write permissions".
+- Tick **"Allow GitHub Actions to create and approve pull requests"**.
+
+Then **Actions → Release → Run workflow**. It builds the ten images, pushes them
+to Artifact Registry and opens a pull request `deploy: <sha>` that changes only
+the image tags in `deploy/bank/kustomization.yaml`. **Merging that pull request is
+the deployment**: ArgoCD applies whatever is on `main`. From now on every merge to
+`main` that touches service code builds new images and opens a new deploy pull
+request (an older unmerged one is closed). `main` can stay protected.
+
+Pull requests opened by GitHub Actions do not trigger other workflows, so CI does
+not run on a deploy pull request. If the branch protection requires status checks,
+an admin merges it anyway; only image tags change in it.
 
 ## 4. Check it
 

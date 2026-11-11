@@ -3,8 +3,11 @@
 
 project_id = "unbeatable-bank-XX" # XX = group number; must be globally unique
 
-# Leave null for a personal project. Set it only if you are creating the project
-# inside an organization you have permission to create projects in.
+# Leave null for a personal Gmail account. If your Google account belongs to an
+# organization (a university or company Google Workspace), Google creates the
+# project inside it whatever this says: set its ID here, or the next plan will try
+# to move the project out (find it with: gcloud projects describe <project_id>
+# --format="value(parent.id)").
 org_id = null
 
 region = "us-central1"
@@ -19,6 +22,16 @@ billing_accounts = {
 }
 
 active_billing = "a"
+
+# The billing accounts' currency: gcloud billing accounts describe <ID> --format="value(currencyCode)"
+# Accounts opened in India are usually INR. The amount is the credit in that currency.
+budget_currency = "USD"
+budget_amount   = 50
+# Accounts in another currency (e.g. a free trial opened in India):
+# budget_currencies = { b = "INR" }
+# budget_amounts    = { b = 4300 }
+# Alert emails at these fractions of each budget:
+# budget_alert_thresholds = [0.5, 0.75, 0.9, 1.0]
 
 # Teammates only (not yourself).
 team_members = {

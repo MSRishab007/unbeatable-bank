@@ -149,8 +149,8 @@ resource "google_billing_budget" "per_account" {
 
   amount {
     specified_amount {
-      currency_code = "USD"
-      units         = tostring(var.budget_amount_usd)
+      currency_code = lookup(var.budget_currencies, each.key, var.budget_currency)
+      units         = tostring(lookup(var.budget_amounts, each.key, var.budget_amount))
     }
   }
 

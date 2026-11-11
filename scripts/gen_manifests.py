@@ -306,7 +306,7 @@ def edge() -> dict[str, list[dict]]:
     """deploy/edge: certificate, routes and network access for the way in from the internet."""
     skip_dry_run = {"argocd.argoproj.io/sync-options": "SkipDryRunOnMissingResource=true"}   # CRDs come with the charts
     bank = lambda name, **extra: {"name": name, "namespace": NAMESPACE, "labels": labels("edge"), **extra}  # noqa: E731
-    backend = {"service": {"name": "gateway", "port": {"number": 80}}}
+    backend = {"service": {"name": "gateway", "port": {"name": "http"}}}     # the gateway Service: port "http" (8080)
     host_rules = [{"host": h, "http": {"paths": [{"path": "/", "pathType": "Prefix", "backend": backend}]}}
                   for h in PUBLIC_HOSTS]
 

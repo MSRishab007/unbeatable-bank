@@ -19,8 +19,10 @@ spec:
     automated:
       prune: true
       selfHeal: true
+    # A failed sync is retried with the same commit; after the last retry, a newer
+    # commit is picked up. Kept short so a broken release doesn't block the next one for long.
     retry:
-      limit: 20
+      limit: 5
       backoff:
         duration: 20s
         factor: 2

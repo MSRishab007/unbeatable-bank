@@ -31,3 +31,10 @@ vendor/
 .vscode/
 .dev/
 .build/
+
+
+variables.txt
+notes*.txt
+*.secret
+*.secrets
+*passwords*

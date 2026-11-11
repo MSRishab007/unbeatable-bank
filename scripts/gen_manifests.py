@@ -206,7 +206,10 @@ def migration_job(name: str) -> dict:
             "argocd.argoproj.io/hook": "PreSync",
             "argocd.argoproj.io/hook-delete-policy": "BeforeHookCreation",
         }},
-        "spec": {"backoffLimit": 4, "ttlSecondsAfterFinished": 3600, "template": {
+        # activeDeadlineSeconds: a job that can't even start (an image that doesn't exist yet,
+        # a database that is down) fails after 10 minutes instead of waiting forever, so the
+        # sync fails and ArgoCD can move on to a newer commit.
+        "spec": {"backoffLimit": 4, "activeDeadlineSeconds": 600, "ttlSecondsAfterFinished": 3600, "template": {
             "metadata": {"labels": {"app": f"{name}-migrate", **LABELS}},
             "spec": {"restartPolicy": "Never", "securityContext": POD_SECURITY, "containers": [{
                 "name": "migrate", "image": f"unbeatable/{name}", "command": ["alembic", "upgrade", "head"],

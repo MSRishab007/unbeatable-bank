@@ -192,7 +192,7 @@ jobs:
             done
             echo "emulator on port $port did not start"; docker logs firestore; docker logs pubsub; docker logs gcs; exit 1
           done
-      - run: pip install -e "libs/common[gcp]" "psycopg[binary]==3.2.3" psycopg-pool==3.2.4 pytest==8.3.4
+      - run: pip install -e "libs/common[gcp]" "psycopg[binary]==3.2.3" psycopg-pool==3.2.4 fastapi==0.115.6 httpx==0.28.1 pytest==8.3.4
       - run: pytest -q -rs libs/common/tests
 
   compose-e2e:

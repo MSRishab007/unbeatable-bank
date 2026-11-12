@@ -35,6 +35,8 @@ def current(deps: Deps) -> dict:
         "gmail_paused_until": paused_until if paused_until > deps.clock() else None,
         "gmail_paused_reason": state.get("gmail_paused_reason") if paused_until > deps.clock() else None,
         "today": {k: v for k, v in stats.items() if k != "id"},
+        # Reported by the Notification function when it starts; unknown until it has run.
+        "configured": state.get("configured"),
         "updated_by": (deps.docstore.get("settings", "notifications") or {}).get("updated_by"),
     }
 

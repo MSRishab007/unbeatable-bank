@@ -1877,8 +1877,11 @@
         h("button", { class: `quiet small ${n[key] ? "danger" : ""}`, type: "button",
           onclick: change({ [key]: !n[key] }, `${label} ${n[key] ? "switched off" : "switched on"}`) }, n[key] ? "Switch off" : "Switch on")));
     const providers = { auto: "Automatic: Gmail, then Brevo", gmail: "Gmail only", brevo: "Brevo only" };
+    const has = n.configured || {};                       // what the deployment has keys for (unknown: allow all)
+    const missing = (k) => n.configured && ((k === "gmail" && !has.gmail) || (k === "brevo" && !has.brevo));
     const provider = h("select", { name: "email_provider", "aria-label": "Email provider" },
-      Object.entries(providers).map(([k, v]) => h("option", { value: k, selected: n.email_provider === k }, v)));
+      Object.entries(providers).map(([k, v]) => h("option", { value: k, selected: n.email_provider === k, disabled: missing(k) },
+        missing(k) ? `${v} (not set up)` : v)));
     provider.addEventListener("change", (e) => change({ email_provider: provider.value }, `Email now goes by: ${providers[provider.value]}`)(e));
     const t = n.today || {};
     return h("div", { class: "sheet", id: "notify-settings" },
@@ -1893,6 +1896,10 @@
         h("button", { class: "quiet small", type: "button", onclick: (e) => busy(e.currentTarget, async () => {
           await api("POST", "/api/staff/settings/notifications/resume-gmail"); toast("Gmail will be tried again"); render();
         }) }, "Try Gmail again now")),
+      n.configured && h("p", { class: "small", style: "margin:12px 0 0", id: "notify-configured" }, "Set up: ",
+        h("span", { class: "actions", style: "display:inline-flex" }, ["gmail", "brevo", "rcs"].map((k) =>
+          tag(`${{ gmail: "Gmail", brevo: "Brevo", rcs: "RCS" }[k]} ${has[k] ? "ready" : k === "rcs" ? "simulated" : "not set up"}`,
+            has[k] ? "good" : "")))),
       h("div", { class: "stats", style: "margin-top:14px" },
         h("div", { class: "stat" }, h("b", null, t.gmail || 0), h("span", null, `Emails by Gmail today${t.gmail_failed ? ` (${t.gmail_failed} failed)` : ""}`)),
         h("div", { class: "stat" }, h("b", null, t.brevo || 0), h("span", null, `Emails by Brevo today${t.brevo_failed ? ` (${t.brevo_failed} failed)` : ""}`)),

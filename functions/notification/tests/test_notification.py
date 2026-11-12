@@ -232,3 +232,59 @@ def test_quota_errors_are_told_apart():
     assert main.is_quota_error(smtplib.SMTPSenderRefused(421, b"4.7.0 Try again later, rate limited", "x"))
     assert not main.is_quota_error(smtplib.SMTPAuthenticationError(535, b"5.7.8 Username and Password not accepted"))
     assert not main.is_quota_error(OSError("connection reset"))
+
+
+def test_without_brevo_gmail_is_never_paused():
+    store, sent = Store(), []
+    out = main.handle(message(message_id="a"), store, {"gmail": quota_hit}, now=1000.0)
+    assert out["email"] == "failed" and ("settings", "notifications_state") not in store.docs
+    store.merge("settings", "notifications_state", {"gmail_paused_until": 999999.0})   # left over from before
+    main._settings_cache = (0.0, {})
+    assert main.handle(message(message_id="b"), store, {"gmail": recorder("gmail", sent)}, now=2000.0)["email_via"] == "gmail"
+
+
+def test_placeholders_from_the_docs_are_not_taken_for_keys(monkeypatch):
+    monkeypatch.setenv("EMAIL_FROM", "bank@gmail.com")
+    monkeypatch.setenv("SMTP_PASSWORD", "abcd efgh ijkl mnop")
+    monkeypatch.setenv("BREVO_API_KEY", "xkeysib-\u2026")        # copied from the instructions
+    assert list(main.email_providers()) == ["gmail"]
+    monkeypatch.setenv("EMAIL_FROM", "\u2026@gmail.com")
+    assert main.email_providers() == {}
+
+
+def test_an_unexpected_error_in_a_provider_never_loses_the_message():
+    def weird(*_):
+        raise UnicodeEncodeError("latin-1", "x", 0, 1, "bad header")
+
+    store = Store()
+    out = main.handle(message(phone="+919876543210"), store, {"gmail": weird, "brevo": weird}, lambda *a: None)
+    assert out["email"] == "failed" and out["rcs"] == "sent"
+    assert ("notifications", "m1") in store.docs                                   # the inbox copy is there
+
+
+def test_smtp_errors_say_which_step_failed(monkeypatch):
+    class Closing:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def starttls(self, context):
+            raise smtplib.SMTPServerDisconnected("Connection unexpectedly closed")
+
+    monkeypatch.setattr(main.smtplib, "SMTP", Closing)
+    monkeypatch.setenv("EMAIL_FROM", "bank@gmail.com")
+    monkeypatch.setenv("SMTP_PASSWORD", "app-password")
+    with pytest.raises(main.StageError, match="starting TLS: SMTPServerDisconnected"):
+        main.send_email_smtp("riya@gmail.com", "s", "b")
+
+
+def test_a_wrapped_quota_error_is_still_recognised():
+    try:
+        raise main.StageError("sending: 550") from smtplib.SMTPDataError(550, b"5.4.5 Daily user sending limit exceeded.")
+    except main.StageError as e:
+        assert main.is_quota_error(e)

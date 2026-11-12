@@ -100,47 +100,78 @@ class FirestoreStore:
 # ------------------------------------------------------------------ email
 
 
+def setting(name: str) -> str:
+    """A configured value, or "" if it is missing or still a placeholder from the docs
+    (like "xkeysib-…"): keys and addresses are plain ASCII."""
+    value = os.getenv(name, "").strip()
+    if not value:
+        return ""
+    if not value.isascii() or "..." in value or value.lower() in ("changeme", "todo", "xxx"):
+        log.error("%s looks like a placeholder, not a real value; ignoring it", name)
+        return ""
+    return value
+
+
+class StageError(RuntimeError):
+    """Which step of sending failed, so the log says more than 'connection closed'."""
+
+
 def send_email_smtp(to: str, subject: str, body: str) -> None:
     """Gmail (or any SMTP server) with STARTTLS. Gmail needs an app password:
     Google Account > Security > 2-Step Verification > App passwords."""
-    sender = os.environ["EMAIL_FROM"]
+    sender = setting("EMAIL_FROM")
     msg = EmailMessage()
     msg["From"] = f"Unbeatable Bank <{sender}>"
     msg["To"] = to
     msg["Subject"] = subject
     msg.set_content(body + FOOTER)
     host, port = os.getenv("SMTP_HOST", "smtp.gmail.com"), int(os.getenv("SMTP_PORT", "587"))
-    with smtplib.SMTP(host, port, timeout=15) as smtp:
-        smtp.starttls(context=ssl.create_default_context())
-        smtp.login(os.getenv("SMTP_USER") or sender, os.environ["SMTP_PASSWORD"])
-        smtp.send_message(msg)
+    password = setting("SMTP_PASSWORD").replace(" ", "")      # Gmail shows app passwords in groups of four
+    stage = f"connecting to {host}:{port}"
+    try:
+        with smtplib.SMTP(host, port, timeout=15) as smtp:
+            stage = "starting TLS"
+            smtp.starttls(context=ssl.create_default_context())
+            stage = f"signing in as {setting('SMTP_USER') or sender}"
+            smtp.login(setting("SMTP_USER") or sender, password)
+            stage = "sending"
+            smtp.send_message(msg)
+    except smtplib.SMTPAuthenticationError as e:
+        raise StageError(f"{stage}: Gmail refused the app password ({e.smtp_code} {e.smtp_error!r})") from e
+    except smtplib.SMTPResponseException as e:
+        raise StageError(f"{stage}: {e.smtp_code} {e.smtp_error!r}") from e
+    except (smtplib.SMTPException, OSError) as e:
+        raise StageError(f"{stage}: {type(e).__name__}: {e}") from e
 
 
 def send_email_brevo(to: str, subject: str, body: str) -> None:
     request = urllib.request.Request(
         "https://api.brevo.com/v3/smtp/email",
         data=json.dumps({
-            "sender": {"email": os.environ["EMAIL_FROM"], "name": "Unbeatable Bank"},
+            "sender": {"email": setting("EMAIL_FROM"), "name": "Unbeatable Bank"},
             "to": [{"email": to}],
             "subject": subject,
             "textContent": body + FOOTER,
         }).encode(),
-        headers={"api-key": os.environ["BREVO_API_KEY"], "content-type": "application/json"},
+        headers={"api-key": setting("BREVO_API_KEY"), "content-type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=10) as response:
-        if response.status >= 300:
-            raise RuntimeError(f"email provider returned {response.status}")
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            if response.status >= 300:
+                raise StageError(f"Brevo answered {response.status}")
+    except urllib.error.HTTPError as e:
+        raise StageError(f"Brevo answered {e.code}: {e.read()[:300]!r}") from e
 
 
 def email_providers() -> dict:
     """The email providers that are configured, Gmail first."""
-    if not os.getenv("EMAIL_FROM"):
+    if not setting("EMAIL_FROM"):
         return {}
     found = {}
-    if os.getenv("SMTP_PASSWORD"):
+    if setting("SMTP_PASSWORD"):
         found["gmail"] = send_email_smtp
-    if os.getenv("BREVO_API_KEY"):
+    if setting("BREVO_API_KEY"):
         found["brevo"] = send_email_brevo
     return found
 
@@ -148,6 +179,7 @@ def email_providers() -> dict:
 def is_quota_error(error: Exception) -> bool:
     """Gmail's answer when the account has sent its daily allowance
     (550 5.4.5 'Daily user sending limit exceeded', or 421 4.7.x 'try again later')."""
+    error = error.__cause__ if isinstance(error, StageError) and error.__cause__ else error
     code = getattr(error, "smtp_code", None)
     text = str(getattr(error, "smtp_error", b"") or error).lower()
     return (code in (550, 421, 454) and any(w in text for w in ("5.4.5", "4.7.0", "limit", "quota", "rate"))) \
@@ -186,8 +218,8 @@ def send_email(store, settings: dict, providers: dict, to: str, subject: str, bo
     global _settings_cache
     choice = settings["email_provider"] if settings["email_provider"] in PROVIDERS else "auto"
     order = [choice] if choice != "auto" else ["gmail", "brevo"]
-    if choice == "auto" and settings["gmail_paused_until"] > now:
-        order = ["brevo"]
+    if choice == "auto" and settings["gmail_paused_until"] > now and "brevo" in providers:
+        order = ["brevo"]           # without Brevo there is nothing to switch to: keep trying Gmail
     tried = False
     for name in order:
         send = providers.get(name)
@@ -198,9 +230,9 @@ def send_email(store, settings: dict, providers: dict, to: str, subject: str, bo
             send(to, subject, body)
             _count(store, name, now)
             return "sent", name
-        except (urllib.error.URLError, smtplib.SMTPException, RuntimeError, OSError) as e:
+        except Exception as e:  # noqa: BLE001 - one provider failing must never lose the message
             _count(store, f"{name}_failed", now)
-            if name == "gmail" and is_quota_error(e):
+            if name == "gmail" and is_quota_error(e) and "brevo" in providers:
                 log.warning("Gmail reached its sending limit; using Brevo for 24 hours")
                 store.merge("settings", "notifications_state", {
                     "gmail_paused_until": now + GMAIL_PAUSE_SECONDS, "gmail_paused_reason": str(e)[:300],
@@ -236,7 +268,7 @@ def send_rcs_rbm(phone: str, text: str, message_id: str) -> None:
 
 
 def rcs_sender():
-    return send_rcs_rbm if os.getenv("RBM_AGENT_ID") and os.getenv("RBM_CREDENTIALS") else None
+    return send_rcs_rbm if setting("RBM_AGENT_ID") and setting("RBM_CREDENTIALS") else None
 
 
 # ------------------------------------------------------------------ one message
@@ -290,7 +322,7 @@ def handle(message: dict, store, mailer=None, rcs=None, now: float | None = None
                 rcs(phone, text, message["message_id"])
                 result["rcs"] = "sent"
                 _count(store, "rcs", now)
-            except (urllib.error.URLError, RuntimeError, OSError, ValueError, KeyError) as e:
+            except Exception as e:  # noqa: BLE001 - never lose the inbox copy over RCS
                 log.warning("RCS to customer %s failed: %s", customer, e)
                 result["rcs"] = "failed"
         elif phone:
@@ -326,6 +358,12 @@ try:
         global _db
         if _db is None:
             _db = FirestoreStore()
+            try:   # tell the admin panel which ways of sending this deployment has
+                _db.merge("settings", "notifications_state", {"configured": {
+                    "gmail": "gmail" in email_providers(), "brevo": "brevo" in email_providers(),
+                    "rcs": rcs_sender() is not None}})
+            except Exception:  # noqa: BLE001
+                log.warning("could not record the configured providers")
         payload = base64.b64decode(cloud_event.data["message"]["data"])
         try:
             message = json.loads(payload)

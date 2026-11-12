@@ -31,7 +31,7 @@ export ANALYST2_PASSWORD ?= $(call staff_pw,analyst2)
 export TELLER_PASSWORD   ?= $(call staff_pw,teller1)
 export KYC_PASSWORD      ?= $(call staff_pw,kyc1)
 
-.PHONY: help init up down flink-up flink-down kubeconfig url dns status argocd grafana smoke ui-test loadtest simulate logs destroy check-project
+.PHONY: help init up down flink-up flink-down kubeconfig url dns email-test status argocd grafana smoke ui-test loadtest simulate logs destroy check-project
 
 help:
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-12s %s\n", $$1, $$2}'
@@ -85,6 +85,9 @@ url: ## print the public URL of the bank, and whether its DNS name has caught up
 dns: ## point the DuckDNS names at the load balancer now, instead of waiting for the next 2-minute run
 	@job=dns-now-$$(date +%s); kubectl -n bank create job $$job --from=cronjob/dns-updater && \
 	kubectl -n bank wait --for=condition=complete job/$$job --timeout=60s; kubectl -n bank logs job/$$job
+
+email-test: ## check the Gmail settings in terraform.tfvars step by step and send yourself a test email
+	python scripts/check_email.py $(TO)
 
 status: ## what ArgoCD has deployed, pods and autoscalers, the HTTPS certificate
 	@kubectl -n argocd get applications 2>/dev/null || true

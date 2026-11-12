@@ -12,6 +12,9 @@ class Store:
     def set(self, collection, doc_id, data):
         self.docs[(collection, doc_id)] = data
 
+    def get(self, collection, doc_id):
+        return self.docs.get((collection, doc_id))
+
 
 def message(**over):
     m = {"message_id": "m1", "customer_id": "c1", "type": "FRAUD", "title": "Was this you?",
@@ -69,3 +72,15 @@ def test_email_failure_still_writes_the_inbox(monkeypatch):
 def test_malformed_message_is_dropped():
     store = Store()
     assert main.handle({"title": "no ids"}, store)["inbox"] is False and store.docs == {}
+
+
+def test_email_address_comes_from_contacts_when_the_message_has_none(monkeypatch):
+    """Fraud, and identity's OTPs, don't carry the address: Identity's contacts record does."""
+    monkeypatch.setenv("BREVO_API_KEY", "k")
+    monkeypatch.setenv("EMAIL_FROM", "bank@example.net")
+    sent = []
+    store = Store()
+    assert main.handle(message(email=None), store, lambda *a: sent.append(a))["email"] == "skipped"
+    store.set("contacts", "c1", {"email": "riya@gmail.com"})
+    assert main.handle(message(email=None, type="OTP"), store, lambda *a: sent.append(a))["email"] == "sent"
+    assert sent[0][0] == "riya@gmail.com"

@@ -20,7 +20,7 @@ import psycopg
 
 from . import security
 from .service import (OTP_TTL_SECONDS, Conflict, Deps, IdentityError, Unavailable, WrongSecret, _cur, _event,
-                      _signal, end_all_sessions, issue_otp, verify_otp)
+                      _signal, end_all_sessions, issue_otp, remember_contact, verify_otp)
 
 MIN_PASSWORD = 8
 
@@ -170,6 +170,8 @@ def confirm_contact_change(conn: psycopg.Connection, deps: Deps, customer_id: UU
             _event(cur, str(customer_id), "ContactChanged", {"customer_id": str(customer_id), "field": field})
     except psycopg.errors.UniqueViolation as e:
         raise Conflict(f"another customer already uses that {field}", field=field) from e
+    remember_contact(deps, customer_id, value if field == "email" else old["email"],
+                     value if field == "phone" else old["phone"])
     _signal(deps, "put", f"sig:cust:{customer_id}:contact_changed", ttl=3 * 86400)
     # Tell the OLD address too: it is the one that would notice a takeover.
     deps.notifier.send(customer_id, "SECURITY", f"Your {field} was changed",

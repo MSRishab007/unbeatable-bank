@@ -198,7 +198,19 @@ def register(conn: psycopg.Connection, deps: Deps, *, full_name: str, date_of_bi
         raise Conflict(f"an account with this {field_name} already exists", field=field_name) from e
     if deps.auto_verify_kyc:
         deps.accounts.verify_kyc(customer_id)
+    remember_contact(deps, customer_id, email, phone)
     return {"customer_id": customer_id, "cif_number": customer.get("cif_number"), "email": email}
+
+
+def remember_contact(deps: Deps, customer_id, email: str, phone: str | None = None) -> None:
+    """contacts/<customer_id>: where the Notification function finds the customer's email
+    when a message doesn't carry it (OTPs, and anything from services that never see it).
+    Written at sign-up, at every sign-in (which covers customers from before this existed)
+    and when the email changes."""
+    try:
+        deps.docstore.set("contacts", str(customer_id), {"email": email, "phone": phone, "updated_at": deps.clock()})
+    except Exception:
+        log.exception("could not record the contact details of %s", customer_id)
 
 
 # ------------------------------------------------------------------ login
@@ -293,6 +305,7 @@ def login(conn: psycopg.Connection, deps: Deps, *, identifier: str, password: st
         raise failure
 
     device_id = str(device["device_id"])
+    remember_contact(deps, customer_id, cred["email"], cred["phone"])     # before any code is sent
     if needs_code:
         challenge_id = uuid.uuid4().hex
         deps.docstore.set("login_challenges", challenge_id, {

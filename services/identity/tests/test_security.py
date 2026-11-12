@@ -25,6 +25,12 @@ def other(code):
 # ------------------------------------------------------------------ new-device codes
 
 
+def test_contact_record_is_kept_for_the_notification_function(conn, deps, user):
+    login(conn, deps, user)
+    contact = deps.docstore.get("contacts", str(user["customer_id"]))
+    assert (contact["email"], contact["phone"]) == (user["email"], user["phone"])
+
+
 def test_wrong_device_codes_end_the_attempt(conn, deps, user):
     login(conn, deps, user)
     challenge = login(conn, deps, user, fingerprint="stolen-laptop")
@@ -307,6 +313,7 @@ def test_contact_change_needs_a_code_and_is_only_a_risk_signal(conn, deps, user)
     assert out == {"changed": "email", "value": new_email}
     assert deps.accounts.customers[str(cid)]["email"] == new_email
     assert login(conn, deps, {**user, "email": new_email})["access_token"]
+    assert deps.docstore.get("contacts", str(cid))["email"] == new_email      # where emails will now go
     assert f"sig:cust:{cid}:contact_changed" in deps.signals.keys
     notice = [n for n in inbox(deps, user) if n["title"] == "Your email was changed"]
     assert notice                                                                 # told about it

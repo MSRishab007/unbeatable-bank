@@ -6,7 +6,10 @@ frozen). For each message this function:
 
   1. writes it to the customer's inbox in Firestore (shown in the web app)
   2. copies OTPs to a simulated SMS outbox (real SMS in India needs DLT registration)
-  3. emails security-relevant messages through Brevo, if an API key is configured
+  3. emails security-relevant messages through Brevo, if an API key is configured.
+     The address comes with the message, or else from contacts/<customer_id>, which
+     Identity keeps up to date (so services that don't know the email, like Fraud,
+     still reach the customer by email)
 
 It is asynchronous and event-driven: nothing waits for it, and Pub/Sub retries
 it if it fails. The inbox document id is the message id, so a retry cannot
@@ -45,6 +48,10 @@ class FirestoreStore:
     def set(self, collection: str, doc_id: str, data: dict) -> None:
         self._db.collection(collection).document(doc_id).set(data)
 
+    def get(self, collection: str, doc_id: str) -> dict | None:
+        snapshot = self._db.collection(collection).document(doc_id).get()
+        return snapshot.to_dict() if snapshot.exists else None
+
 
 def send_email_brevo(to: str, subject: str, body: str) -> None:
     request = urllib.request.Request(
@@ -78,6 +85,13 @@ def handle(message: dict, store, mailer=send_email_brevo) -> dict:
 
     created = message.get("created_at") or time.time()
     result = {"inbox": True, "sms": False, "email": "skipped"}
+    if not message.get("email") and os.getenv("BREVO_API_KEY"):
+        try:
+            contact = store.get("contacts", str(message["customer_id"])) or {}
+        except Exception:  # noqa: BLE001 - no address is no worse than before
+            log.warning("could not look up the email for customer %s", message["customer_id"])
+            contact = {}
+        message = {**message, "email": contact.get("email")}
     if should_email(message):
         try:
             mailer(message["email"], message.get("title", "Unbeatable Bank"), message.get("body", ""))

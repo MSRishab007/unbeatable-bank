@@ -114,8 +114,8 @@ ui-test: ## browser test of the web app against the deployed system (needs playw
 loadtest: ## sustained load to make the autoscalers scale out (needs k6)
 	k6 run -e BASE_URL=$(BASE_URL) loadtest/payments.js
 
-simulate: ## run the fraud personas against the deployed system
-	python loadtest/simulator.py $(BASE_URL)
+simulate: ## run the fraud personas against the deployed system (with Flink: make simulate ARGS=--with-flink)
+	python loadtest/simulator.py $(BASE_URL) $(ARGS)
 
 logs: ## tail the logs of one service: make logs S=intake
 	kubectl -n bank logs -f deployment/$(S) --all-containers --max-log-requests 10

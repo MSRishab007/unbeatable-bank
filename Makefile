@@ -31,7 +31,7 @@ export ANALYST2_PASSWORD ?= $(call staff_pw,analyst2)
 export TELLER_PASSWORD   ?= $(call staff_pw,teller1)
 export KYC_PASSWORD      ?= $(call staff_pw,kyc1)
 
-.PHONY: help init up down flink-up flink-down kubeconfig url dns email-test status argocd grafana smoke ui-test loadtest simulate logs destroy check-project
+.PHONY: help init up down flink-up flink-down kubeconfig url dns email-test status argocd grafana prometheus smoke ui-test loadtest simulate logs destroy check-project
 
 help:
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-12s %s\n", $$1, $$2}'
@@ -99,8 +99,11 @@ argocd: ## open the ArgoCD UI on http://localhost:8081 (user: admin)
 	@echo "password: $$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d)"
 	kubectl -n argocd port-forward service/argocd-server 8081:80
 
-grafana: ## open Grafana on http://localhost:3000 (admin / unbeatable)
+grafana: ## Grafana on port 3000 (Cloud Shell: Web Preview > port 3000; view without signing in)
 	kubectl -n monitoring port-forward service/monitoring-grafana 3000:80
+
+prometheus: ## Prometheus on port 9090, to query metrics directly (Cloud Shell: Web Preview > port 9090)
+	kubectl -n monitoring port-forward service/monitoring-kube-prometheus-prometheus 9090:9090
 
 smoke: ## end-to-end check against the deployed system (staff passwords come from infra/main/terraform.tfvars)
 	python scripts/smoke_test.py $(BASE_URL) --skip-eod

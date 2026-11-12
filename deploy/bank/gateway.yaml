@@ -68,12 +68,14 @@ spec:
             path: /healthz
             port: http
           periodSeconds: 10
+          timeoutSeconds: 3
           failureThreshold: 3
         readinessProbe:
           httpGet:
             path: /readyz
             port: http
           periodSeconds: 5
+          timeoutSeconds: 3
           failureThreshold: 3
         startupProbe:
           httpGet:
@@ -110,7 +112,7 @@ spec:
     kind: Deployment
     name: gateway
   minReplicas: 1
-  maxReplicas: 4
+  maxReplicas: 6
   metrics:
   - type: Resource
     resource:

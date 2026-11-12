@@ -301,7 +301,9 @@ def authorize(route: Route, claims: dict | None) -> JSONResponse | None:
 
 
 @app.get("/healthz")
-def healthz():
+async def healthz():
+    # async: answered on the event loop, so a busy thread pool (every worker waiting
+    # for a database connection under load) can't make the liveness probe time out.
     return {"status": "ok"}
 
 

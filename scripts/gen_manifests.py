@@ -82,8 +82,9 @@ COMMON_ENV = {
 #   gcp       uses a Kubernetes ServiceAccount bound to a Google service account (created by Terraform)
 #   infra     env name -> key in ConfigMap bank-infra (overrides the value envFrom would give)
 SERVICES: dict[str, dict] = {
-    "gateway": {"secrets": ["JWT_SECRET"], "hpa": (1, 4), "env": {"ALLOW_SIM_HEADERS": "true"}},
-    "identity": {"db": True, "outbox": True, "secrets": ["JWT_SECRET", "STAFF_BOOTSTRAP"], "gcp": True,
+    "gateway": {"secrets": ["JWT_SECRET"], "hpa": (1, 6), "env": {"ALLOW_SIM_HEADERS": "true"}},
+    # identity is on every request's path now (session check) and every payment's (PIN).
+    "identity": {"db": True, "outbox": True, "secrets": ["JWT_SECRET", "STAFF_BOOTSTRAP"], "gcp": True, "hpa": (1, 4),
                  "infra": {"GCS_BUCKET": "KYC_BUCKET"}},       # its bucket is the KYC one, not the reports one
     "account": {"db": True, "outbox": True},
     "ledger": {"db": True, "outbox": True, "grpc": 50051, "env": {"GRPC_PORT": "50051"}},
@@ -109,9 +110,9 @@ def probes() -> dict:
     http = lambda path: {"httpGet": {"path": path, "port": "http"}}  # noqa: E731
     return {
         # /healthz never touches a dependency: a database outage must not restart every pod.
-        "livenessProbe": {**http("/healthz"), "periodSeconds": 10, "failureThreshold": 3},
+        "livenessProbe": {**http("/healthz"), "periodSeconds": 10, "timeoutSeconds": 3, "failureThreshold": 3},
         # /readyz checks dependencies: an unready pod just stops receiving traffic.
-        "readinessProbe": {**http("/readyz"), "periodSeconds": 5, "failureThreshold": 3},
+        "readinessProbe": {**http("/readyz"), "periodSeconds": 5, "timeoutSeconds": 3, "failureThreshold": 3},
         "startupProbe": {**http("/healthz"), "periodSeconds": 3, "failureThreshold": 40},
     }
 

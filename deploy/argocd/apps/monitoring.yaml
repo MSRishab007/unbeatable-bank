@@ -28,6 +28,14 @@ spec:
           # Demo only: Grafana is reachable solely through `make grafana` (port-forward).
           adminPassword: unbeatable
           defaultDashboardsTimezone: browser
+          # Cloud Shell's Web Preview reaches Grafana from a *.cloudshell.dev address while
+          # Grafana thinks it is on localhost, so its cross-site check refuses a signed-in
+          # browser ("origin not allowed"). Viewing without signing in skips that check;
+          # Grafana is only reachable through `make grafana` (a port-forward), never publicly.
+          grafana.ini:
+            auth.anonymous:
+              enabled: true
+              org_role: Viewer
           sidecar:
             dashboards:
               enabled: true

@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
+from ubcommon.dbpool import connection_dependency
 from ubcommon.auth import parse_actor
 from ubcommon.docstore import get_docstore
 from ubcommon.logging_setup import setup_logging
@@ -74,9 +75,8 @@ app = FastAPI(title="Fraud Alert", version="0.1.0", lifespan=lifespan)
 instrument(app, "fraud")
 
 
-def get_conn():
-    with _state["pool"].connection() as conn:
-        yield conn
+# Waits for a free connection without holding a worker thread (see ubcommon.dbpool).
+get_conn = connection_dependency(lambda: _state["pool"])
 
 
 def get_deps() -> service.Deps:
@@ -135,7 +135,9 @@ class EventIn(BaseModel):
 
 
 @app.get("/healthz")
-def healthz():
+async def healthz():
+    # async: answered on the event loop, so a busy thread pool (every worker waiting
+    # for a database connection under load) can't make the liveness probe time out.
     return {"status": "ok"}
 
 

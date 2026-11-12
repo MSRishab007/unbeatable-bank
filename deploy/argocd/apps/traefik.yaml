@@ -39,6 +39,15 @@ spec:
         resources:
           requests: { cpu: 100m, memory: 64Mi }
           limits: { memory: 256Mi }
+        # When a pod is stopped (scaling in, moving nodes), keep serving for 15 s while the
+        # load balancer notices, so clients don't get "connection reset".
+        ports:
+          web:
+            transport:
+              lifeCycle: { requestAcceptGraceTimeout: 15s, graceTimeOut: 10s }
+          websecure:
+            transport:
+              lifeCycle: { requestAcceptGraceTimeout: 15s, graceTimeOut: 10s }
         service:
           spec:
             type: LoadBalancer

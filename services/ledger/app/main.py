@@ -15,6 +15,7 @@ from fastapi import Depends, FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from ubcommon.dbpool import connection_dependency
 from ubcommon.logging_setup import setup_logging
 from ubcommon.metrics import instrument
 
@@ -38,9 +39,8 @@ app = FastAPI(title="Ledger Service", version="0.1.0", lifespan=lifespan)
 instrument(app, "ledger")
 
 
-def get_conn():
-    with init_pool().connection() as conn:
-        yield conn
+# Waits for a free connection without holding a worker thread (see ubcommon.dbpool).
+get_conn = connection_dependency(lambda: init_pool())
 
 
 @app.exception_handler(posting.LedgerError)
@@ -105,7 +105,9 @@ class HoldIn(BaseModel):
 
 
 @app.get("/healthz")
-def healthz():
+async def healthz():
+    # async: answered on the event loop, so a busy thread pool (every worker waiting
+    # for a database connection under load) can't make the liveness probe time out.
     return {"status": "ok"}
 
 

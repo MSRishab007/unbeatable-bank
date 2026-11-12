@@ -7,7 +7,6 @@ metadata:
     app: identity
     app.kubernetes.io/part-of: unbeatable-bank
 spec:
-  replicas: 1
   selector:
     matchLabels:
       app: identity
@@ -82,12 +81,14 @@ spec:
             path: /healthz
             port: http
           periodSeconds: 10
+          timeoutSeconds: 3
           failureThreshold: 3
         readinessProbe:
           httpGet:
             path: /readyz
             port: http
           periodSeconds: 5
+          timeoutSeconds: 3
           failureThreshold: 3
         startupProbe:
           httpGet:
@@ -146,6 +147,37 @@ spec:
   - name: http
     port: 8080
     targetPort: http
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: identity
+  labels:
+    app: identity
+    app.kubernetes.io/part-of: unbeatable-bank
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: identity
+  minReplicas: 1
+  maxReplicas: 4
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 60
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Pods
+        value: 2
+        periodSeconds: 30
+    scaleDown:
+      stabilizationWindowSeconds: 120
 ---
 apiVersion: batch/v1
 kind: Job

@@ -41,8 +41,13 @@ resource "google_project_iam_member" "fn_builder" {
 }
 
 locals {
-  # Whether a key was supplied is not itself a secret.
-  email_enabled = nonsensitive(var.brevo_api_key != "")
+  # The Notification function's secrets that were supplied (which ones is not itself a secret).
+  fn_secret_values = {
+    SMTP_PASSWORD   = var.smtp_password
+    BREVO_API_KEY   = var.brevo_api_key
+    RBM_CREDENTIALS = var.rbm_credentials
+  }
+  fn_secret_names = toset([for k, v in local.fn_secret_values : k if nonsensitive(v != "")])
 }
 
 data "archive_file" "notification" {
@@ -59,23 +64,23 @@ resource "google_storage_bucket_object" "notification" {
   source = data.archive_file.notification.output_path
 }
 
-resource "google_secret_manager_secret" "brevo" {
-  count     = local.email_enabled ? 1 : 0
-  secret_id = "ub-brevo-api-key"
+resource "google_secret_manager_secret" "fn" {
+  for_each  = local.fn_secret_names
+  secret_id = "ub-notification-${lower(replace(each.key, "_", "-"))}"
   replication {
     auto {}
   }
 }
 
-resource "google_secret_manager_secret_version" "brevo" {
-  count       = local.email_enabled ? 1 : 0
-  secret      = google_secret_manager_secret.brevo[0].id
-  secret_data = var.brevo_api_key
+resource "google_secret_manager_secret_version" "fn" {
+  for_each    = local.fn_secret_names
+  secret      = google_secret_manager_secret.fn[each.key].id
+  secret_data = local.fn_secret_values[each.key]
 }
 
-resource "google_secret_manager_secret_iam_member" "brevo" {
-  count     = local.email_enabled ? 1 : 0
-  secret_id = google_secret_manager_secret.brevo[0].id
+resource "google_secret_manager_secret_iam_member" "fn" {
+  for_each  = local.fn_secret_names
+  secret_id = google_secret_manager_secret.fn[each.key].id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.fn_notification.email}"
 }
@@ -108,14 +113,15 @@ resource "google_cloudfunctions2_function" "notification" {
     environment_variables = {
       FIRESTORE_DATABASE = google_firestore_database.main.name
       EMAIL_FROM         = var.email_from
+      RBM_AGENT_ID       = var.rbm_agent_id
     }
 
     dynamic "secret_environment_variables" {
-      for_each = local.email_enabled ? [1] : []
+      for_each = local.fn_secret_names
       content {
-        key        = "BREVO_API_KEY"
+        key        = secret_environment_variables.value
         project_id = var.project_id
-        secret     = google_secret_manager_secret.brevo[0].secret_id
+        secret     = google_secret_manager_secret.fn[secret_environment_variables.value].secret_id
         version    = "latest"
       }
     }
@@ -132,6 +138,7 @@ resource "google_cloudfunctions2_function" "notification" {
   depends_on = [
     google_project_iam_member.fn_builder,
     google_project_iam_member.fn_notification,
-    google_secret_manager_secret_version.brevo,
+    google_secret_manager_secret_version.fn,
+    google_secret_manager_secret_iam_member.fn,
   ]
 }

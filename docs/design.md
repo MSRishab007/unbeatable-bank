@@ -162,7 +162,7 @@ flowchart LR
 | 6 | **Ledger** | The only code that moves money. Double-entry journals, balances, holds, reversals, interest, reconciliation | GKE | Cloud SQL |
 | 7 | **Risk Detection** | Scores each payment against 17 weighted rules using DynaStore features; shadow mode for new rules | GKE, HPA | DynaStore |
 | 8 | **Fraud Alert** | Consumes events and Flink signals; alerts, automatic freezes, cases, analyst workflow with maker-checker; customer inbox API | GKE | Cloud SQL, Firestore |
-| 9 | **Notification Service** | Writes the customer inbox, simulated SMS for OTPs, optional email | **Cloud Function** | Firestore |
+| 9 | **Notification Service** | Writes the customer inbox; per message, also email (Gmail SMTP or Brevo) and RCS (Google RBM, or a simulated outbox) | **Cloud Function** | Firestore |
 | 10 | **Audit Analytics** | Windowed aggregation of the transaction stream: throughput, rejections, rate-limit decisions, unique customers, fraud patterns | **Flink on Dataproc** | Kafka, GCS checkpoints |
 | 11 | **Deposits & EOD** | Fixed and recurring deposits, rate cards, early closure, the end-of-day batch (interest, installments, maturities), bank calendar, PDF statements | GKE | Cloud SQL, GCS |
 | 12 | **DynaStore** | The leaderless key-value store (the course concept) | GKE StatefulSet | local disk |
@@ -392,7 +392,8 @@ Chromium against a running stack and is part of CI.
   or manifest change away from the production setting.
 - DynaStore's membership is static (the peers are listed in configuration). Adding
   nodes means a rolling restart; anti-entropy then moves the data.
-- SMS is simulated (real SMS in India needs DLT registration); email is optional.
+- Plain SMS isn't sent (real SMS in India needs DLT registration); RCS is simulated until
+  an RBM test agent is configured; email needs a Gmail app password (or Brevo).
 - Statement PDFs use the built-in Helvetica font, which covers Latin-1: other scripts
   in a payment note print as "?". Uploaded KYC files are checked by type and size but
   not scanned for malware.

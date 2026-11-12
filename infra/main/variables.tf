@@ -72,13 +72,33 @@ variable "staff_bootstrap" {
 }
 
 variable "email_from" {
-  description = "Sender address verified with the email provider (Brevo). Empty = emails are skipped."
+  description = "Sender address: the Gmail account (SMTP), or a sender verified in Brevo. Empty = no emails."
   type        = string
   default     = ""
 }
 
+variable "smtp_password" {
+  description = "App password of the email_from Gmail account (Google Account > Security > App passwords). Preferred over Brevo when set."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 variable "brevo_api_key" {
-  description = "Brevo API key for real emails. Empty = emails are skipped."
+  description = "Brevo API key: the other way to send email. Empty = not used."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "rbm_agent_id" {
+  description = "Google RCS Business Messaging agent id. Empty = RCS messages go to a simulated outbox."
+  type        = string
+  default     = ""
+}
+
+variable "rbm_credentials" {
+  description = "The RBM agent's service-account key (the JSON file's contents)."
   type        = string
   default     = ""
   sensitive   = true

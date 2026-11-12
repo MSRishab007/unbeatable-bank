@@ -290,10 +290,14 @@ D6. **Customer-facing fraud explanations:** why a payment was held, in plain wor
 
 ### E. Notifications and the customer
 
-E1. **OTPs and alerts over free channels**, all sent by the Notification Cloud Function:
-- Email through Brevo (already wired; free plan about 300 emails/day, no card). Needs
-  an API key in Secret Manager and a verified sender address.
-- RCS through a Google RCS Business Messaging *test* agent: messages to registered
+E1. **OTPs and alerts over free channels**, all sent by the Notification Cloud Function.
+BUILT (12 Nov): every message can choose `channels` (email, rcs) besides the inbox;
+by default codes, security and fraud messages go everywhere, routine ones inbox only.
+The address and phone come from `contacts/<customer_id>` (kept by Identity).
+- Email by Gmail SMTP with an app password (`email_from` + `smtp_password`), or Brevo.
+- RCS: real sending is written (RBM API) but not yet tried; until `rbm_agent_id` and
+  `rbm_credentials` are set, RCS messages land in the Firestore collection `rcs_outbox`.
+  To make it real: through a Google RCS Business Messaging *test* agent: messages to registered
   test devices are not charged, and an unlaunched agent can only message those
   devices (each must accept an invite; 200 invites in total). Enough for the team's
   and the examiners' phones; a public launch would need brand verification and is paid.

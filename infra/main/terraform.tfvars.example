@@ -6,9 +6,19 @@ project_id = "unbeatable-bank-XX"
 # Roles: ADMIN (everything), ANALYST (fraud cases), TELLER (cash deposits), KYC (verify customers).
 staff_bootstrap = "admin:ADMIN:change-me-1,analyst1:ANALYST:change-me-2,analyst2:ANALYST:change-me-3,teller1:TELLER:change-me-4"
 
-# Optional: real emails through Brevo (https://www.brevo.com, free tier).
-# email_from    = "you@example.com"
+# Optional: real emails. Simplest: a Gmail account with an app password
+# (Google Account > Security > 2-Step Verification on > App passwords).
+# email_from    = "unbeatable.bank.demo@gmail.com"
+# smtp_password = "abcd efgh ijkl mnop"
+# Or through Brevo (https://www.brevo.com, free tier) instead of SMTP:
 # brevo_api_key = "xkeysib-..."
+
+# Optional: real RCS messages (Google RCS Business Messaging test agent). Without it,
+# RCS messages are kept in the Firestore collection rcs_outbox.
+# rbm_agent_id    = "unbeatable-bank-agent"
+# rbm_credentials = <<-EOT
+#   { ...the agent's service-account key JSON... }
+# EOT
 
 # Optional: keep https://unbeatable-bank.duckdns.org and https://ubank.duckdns.org pointing at
 # the cluster. The token is on https://www.duckdns.org after signing in (the account that owns both names).

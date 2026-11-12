@@ -40,7 +40,7 @@ from ubcommon.metrics import instrument
 from ubcommon.notify import get_notifier
 from ubcommon.objstore import get_objstore
 
-from . import kyc, pins, recovery, service
+from . import kyc, notify_settings, pins, recovery, service
 
 _state: dict = {}
 
@@ -252,6 +252,12 @@ class CodeIn(BaseModel):
     code: str
 
 
+class NotifySettingsIn(BaseModel):
+    email_enabled: bool | None = None
+    rcs_enabled: bool | None = None
+    email_provider: str | None = Field(None, pattern="^(auto|gmail|brevo)$")
+
+
 class StaffLoginIn(BaseModel):
     staff_id: str
     password: str
@@ -443,6 +449,28 @@ def staff_logout(x_actor: str = Header(..., alias="X-Actor"), session_id: str = 
     if actor.kind != "staff":
         raise HTTPException(status_code=403, detail="staff only")
     service.staff_logout(deps, actor.id, session_id)
+
+
+def require_admin(x_actor: str = Header(..., alias="X-Actor")):
+    actor = parse_actor(x_actor)
+    if actor.kind != "staff" or actor.role != "ADMIN":
+        raise HTTPException(status_code=403, detail="administrators only")
+    return actor
+
+
+@app.get("/v1/staff/settings/notifications")
+def notification_settings(actor=Depends(require_admin), deps=Depends(get_deps)):
+    return notify_settings.current(deps)
+
+
+@app.patch("/v1/staff/settings/notifications")
+def change_notification_settings(body: NotifySettingsIn, actor=Depends(require_admin), deps=Depends(get_deps)):
+    return notify_settings.update(deps, actor.header(), **body.model_dump())
+
+
+@app.post("/v1/staff/settings/notifications/resume-gmail")
+def resume_gmail(actor=Depends(require_admin), deps=Depends(get_deps)):
+    return notify_settings.resume_gmail(deps, actor.header())
 
 
 @app.get("/internal/v1/sessions/{session_id}/active")

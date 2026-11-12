@@ -17,6 +17,15 @@ The email address and phone come with the message, or else from contacts/<custom
 which Identity keeps up to date, so services that never see them (Fraud) still reach
 the customer.
 
+Administrators control it from the staff console (System > Notifications), through
+the Firestore document settings/notifications (written by Identity):
+    email_enabled, rcs_enabled   switch a channel off for everyone (the inbox stays)
+    email_provider               "auto" (Gmail, then Brevo), "gmail" or "brevo"
+In "auto", Gmail is used until it reports its daily sending limit; then Gmail is paused
+for 24 hours (settings/notifications_state.gmail_paused_until) and Brevo takes over.
+Any other Gmail failure also falls through to Brevo for that message. Counts per day
+and provider are kept in notification_stats/<YYYY-MM-DD>.
+
 It is asynchronous and event-driven: nothing waits for it, and Pub/Sub retries it if
 it fails. The inbox document id is the message id, so a retry cannot create a
 duplicate. A channel that fails is recorded as "failed"; it doesn't make Pub/Sub
@@ -36,6 +45,7 @@ Environment:
 from __future__ import annotations
 
 import base64
+import datetime
 import json
 import logging
 import os
@@ -58,7 +68,11 @@ DEFAULT_CHANNELS = {
 }                                   # anything else (TXN, INFO): the inbox only
 NEVER_EMAIL_DOMAINS = ("loadtest.local", "example.com", "example.org")   # simulator and test users
 FOOTER = "\n\nUnbeatable Bank (student project, not a real bank)"
+PROVIDERS = ("auto", "gmail", "brevo")
+GMAIL_PAUSE_SECONDS = 24 * 3600     # Gmail's sending limit is over a rolling day
+SETTINGS_TTL = 30                   # seconds a function instance reuses the settings it read
 _db = None
+_settings_cache: tuple[float, dict] = (0.0, {})
 
 
 class FirestoreStore:
@@ -73,6 +87,14 @@ class FirestoreStore:
     def get(self, collection: str, doc_id: str) -> dict | None:
         snapshot = self._db.collection(collection).document(doc_id).get()
         return snapshot.to_dict() if snapshot.exists else None
+
+    def merge(self, collection: str, doc_id: str, data: dict) -> None:
+        self._db.collection(collection).document(doc_id).set(data, merge=True)
+
+    def increment(self, collection: str, doc_id: str, field: str) -> None:
+        from google.cloud import firestore
+
+        self._db.collection(collection).document(doc_id).set({field: firestore.Increment(1)}, merge=True)
 
 
 # ------------------------------------------------------------------ email
@@ -111,15 +133,82 @@ def send_email_brevo(to: str, subject: str, body: str) -> None:
             raise RuntimeError(f"email provider returned {response.status}")
 
 
-def email_sender():
-    """The configured way to send email, or None."""
+def email_providers() -> dict:
+    """The email providers that are configured, Gmail first."""
     if not os.getenv("EMAIL_FROM"):
-        return None
+        return {}
+    found = {}
     if os.getenv("SMTP_PASSWORD"):
-        return send_email_smtp
+        found["gmail"] = send_email_smtp
     if os.getenv("BREVO_API_KEY"):
-        return send_email_brevo
-    return None
+        found["brevo"] = send_email_brevo
+    return found
+
+
+def is_quota_error(error: Exception) -> bool:
+    """Gmail's answer when the account has sent its daily allowance
+    (550 5.4.5 'Daily user sending limit exceeded', or 421 4.7.x 'try again later')."""
+    code = getattr(error, "smtp_code", None)
+    text = str(getattr(error, "smtp_error", b"") or error).lower()
+    return (code in (550, 421, 454) and any(w in text for w in ("5.4.5", "4.7.0", "limit", "quota", "rate"))) \
+        or "daily user sending" in text
+
+
+def load_settings(store, now: float) -> dict:
+    """settings/notifications plus its state, cached for SETTINGS_TTL."""
+    global _settings_cache
+    at, cached = _settings_cache
+    if cached and now - at < SETTINGS_TTL:
+        return cached
+    try:
+        chosen = store.get("settings", "notifications") or {}
+        state = store.get("settings", "notifications_state") or {}
+    except Exception:  # noqa: BLE001 - fall back to the defaults rather than lose the message
+        log.warning("could not read the notification settings; using the defaults")
+        chosen, state = {}, {}
+    settings = {"email_enabled": chosen.get("email_enabled", True), "rcs_enabled": chosen.get("rcs_enabled", True),
+                "email_provider": chosen.get("email_provider", "auto"),
+                "gmail_paused_until": state.get("gmail_paused_until") or 0}
+    _settings_cache = (now, settings)
+    return settings
+
+
+def _count(store, field: str, now: float) -> None:
+    try:
+        day = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime("%Y-%m-%d")
+        store.increment("notification_stats", day, field)
+    except Exception:  # noqa: BLE001 - counting must never stop a message
+        log.warning("could not count %s", field)
+
+
+def send_email(store, settings: dict, providers: dict, to: str, subject: str, body: str, now: float) -> tuple[str, str]:
+    """(status, provider used). In "auto": Gmail unless paused, then Brevo."""
+    global _settings_cache
+    choice = settings["email_provider"] if settings["email_provider"] in PROVIDERS else "auto"
+    order = [choice] if choice != "auto" else ["gmail", "brevo"]
+    if choice == "auto" and settings["gmail_paused_until"] > now:
+        order = ["brevo"]
+    tried = False
+    for name in order:
+        send = providers.get(name)
+        if send is None:
+            continue
+        tried = True
+        try:
+            send(to, subject, body)
+            _count(store, name, now)
+            return "sent", name
+        except (urllib.error.URLError, smtplib.SMTPException, RuntimeError, OSError) as e:
+            _count(store, f"{name}_failed", now)
+            if name == "gmail" and is_quota_error(e):
+                log.warning("Gmail reached its sending limit; using Brevo for 24 hours")
+                store.merge("settings", "notifications_state", {
+                    "gmail_paused_until": now + GMAIL_PAUSE_SECONDS, "gmail_paused_reason": str(e)[:300],
+                    "gmail_paused_at": now})
+                _settings_cache = (0.0, {})
+            else:
+                log.warning("email by %s failed: %s", name, e)
+    return ("failed" if tried else "skipped"), ""
 
 
 # ------------------------------------------------------------------ RCS
@@ -159,16 +248,19 @@ def channels_for(message: dict) -> list[str]:
     return [c for c in chosen if c in CHANNELS]
 
 
-def handle(message: dict, store, mailer=None, rcs=None) -> dict:
+def handle(message: dict, store, mailer=None, rcs=None, now: float | None = None) -> dict:
     """Process one notification. Returns what was done per channel (also useful in tests).
 
-    mailer / rcs default to whatever is configured; tests pass their own."""
+    mailer: a send function (used as "gmail") or {"gmail": f, "brevo": g}; rcs: a send
+    function. Both default to whatever is configured; tests pass their own."""
     if not message.get("customer_id") or not message.get("message_id"):
         log.error("dropping malformed notification: %s", message)
         return {"inbox": False, "email": "skipped", "rcs": "skipped"}
-    mailer = mailer if mailer is not None else email_sender()
+    now = now if now is not None else time.time()
+    providers = mailer if isinstance(mailer, dict) else ({"gmail": mailer} if mailer else email_providers())
     rcs = rcs if rcs is not None else rcs_sender()
-    created = message.get("created_at") or time.time()
+    settings = load_settings(store, now)
+    created = message.get("created_at") or now
     customer = str(message["customer_id"])
     title, body = message.get("title", "Unbeatable Bank"), message.get("body", "")
     wanted = channels_for(message)
@@ -181,23 +273,23 @@ def handle(message: dict, store, mailer=None, rcs=None) -> dict:
         except Exception:  # noqa: BLE001 - no address is no worse than not sending
             log.warning("could not look up the contact details of customer %s", customer)
 
-    if "email" in wanted:
+    if "email" in wanted and not settings["email_enabled"]:
+        result["email"] = "off"
+    elif "email" in wanted:
         email = (message.get("email") or contact.get("email") or "").lower()
-        if mailer and "@" in email and not email.endswith(NEVER_EMAIL_DOMAINS):
-            try:
-                mailer(email, title, body)
-                result["email"] = "sent"
-            except (urllib.error.URLError, smtplib.SMTPException, RuntimeError, OSError) as e:
-                log.warning("email to customer %s failed: %s", customer, e)
-                result["email"] = "failed"
+        if providers and "@" in email and not email.endswith(NEVER_EMAIL_DOMAINS):
+            result["email"], result["email_via"] = send_email(store, settings, providers, email, title, body, now)
 
-    if "rcs" in wanted:
+    if "rcs" in wanted and not settings["rcs_enabled"]:
+        result["rcs"] = "off"
+    elif "rcs" in wanted:
         phone = message.get("phone") or contact.get("phone")
         text = f"{title}\n{body}"
         if phone and rcs:
             try:
                 rcs(phone, text, message["message_id"])
                 result["rcs"] = "sent"
+                _count(store, "rcs", now)
             except (urllib.error.URLError, RuntimeError, OSError, ValueError, KeyError) as e:
                 log.warning("RCS to customer %s failed: %s", customer, e)
                 result["rcs"] = "failed"
@@ -206,6 +298,7 @@ def handle(message: dict, store, mailer=None, rcs=None) -> dict:
             store.set("rcs_outbox", message["message_id"], {
                 "customer_id": customer, "phone": phone, "text": text, "created_at": created})
             result["rcs"] = "simulated"
+            _count(store, "rcs_simulated", now)
 
     store.set("notifications", message["message_id"], {
         "customer_id": customer,
@@ -216,6 +309,7 @@ def handle(message: dict, store, mailer=None, rcs=None) -> dict:
         "created_at": created,
         "read": False,
         "email": result["email"],
+        "email_via": result.get("email_via", ""),
         "rcs": result["rcs"],
     })
     log.info("notification %s type=%s customer=%s email=%s rcs=%s", message["message_id"], message.get("type"),

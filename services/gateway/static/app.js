@@ -1866,11 +1866,46 @@
       h("tbody", null, rows.map((r) => h("tr", null, cols.map((c) => h("td", { class: typeof r[c] === "number" ? "num" : "" }, r[c] == null ? "" : String(r[c]))))))));
   }
 
+  // Email and RCS switches for the Notification function (it reads them within 30 seconds).
+  function notificationsPanel(n) {
+    const change = (body, done) => (e) => busy(e.currentTarget, async () => {
+      await api("PATCH", "/api/staff/settings/notifications", body); toast(done); render();
+    });
+    const sw = (label, key, help) => h("div", { class: "setting", "data-setting": key },
+      h("div", { class: "main" }, h("strong", null, label), h("span", { class: "muted small" }, help)),
+      h("div", { class: "actions" }, tag(n[key] ? "On" : "Off", n[key] ? "good" : "bad"),
+        h("button", { class: `quiet small ${n[key] ? "danger" : ""}`, type: "button",
+          onclick: change({ [key]: !n[key] }, `${label} ${n[key] ? "switched off" : "switched on"}`) }, n[key] ? "Switch off" : "Switch on")));
+    const providers = { auto: "Automatic: Gmail, then Brevo", gmail: "Gmail only", brevo: "Brevo only" };
+    const provider = h("select", { name: "email_provider", "aria-label": "Email provider" },
+      Object.entries(providers).map(([k, v]) => h("option", { value: k, selected: n.email_provider === k }, v)));
+    provider.addEventListener("change", (e) => change({ email_provider: provider.value }, `Email now goes by: ${providers[provider.value]}`)(e));
+    const t = n.today || {};
+    return h("div", { class: "sheet", id: "notify-settings" },
+      h("p", { class: "muted small", style: "margin-top:0" }, "Every message always reaches the customer's in-app inbox. These switch the extra channels for everyone; codes still arrive in the inbox when email is off."),
+      sw("Email", "email_enabled", "Codes, security and fraud alerts, KYC results"),
+      sw("RCS", "rcs_enabled", "Codes, security and fraud alerts to the customer's phone"),
+      h("div", { class: "setting" }, h("div", { class: "main" }, h("strong", null, "Email goes by"),
+        h("span", { class: "muted small" }, "Automatic uses Gmail until it reports its daily limit, then Brevo for 24 hours. Any other Gmail failure also falls back to Brevo for that message.")),
+        h("div", { class: "actions" }, provider)),
+      n.gmail_paused_until && h("div", { class: "notice warn", style: "margin-top:12px" },
+        h("strong", null, `Gmail is paused until ${when(n.gmail_paused_until)}`), n.gmail_paused_reason || "It reached its daily sending limit.", " ",
+        h("button", { class: "quiet small", type: "button", onclick: (e) => busy(e.currentTarget, async () => {
+          await api("POST", "/api/staff/settings/notifications/resume-gmail"); toast("Gmail will be tried again"); render();
+        }) }, "Try Gmail again now")),
+      h("div", { class: "stats", style: "margin-top:14px" },
+        h("div", { class: "stat" }, h("b", null, t.gmail || 0), h("span", null, `Emails by Gmail today${t.gmail_failed ? ` (${t.gmail_failed} failed)` : ""}`)),
+        h("div", { class: "stat" }, h("b", null, t.brevo || 0), h("span", null, `Emails by Brevo today${t.brevo_failed ? ` (${t.brevo_failed} failed)` : ""}`)),
+        h("div", { class: "stat" }, h("b", null, (t.rcs || 0) + (t.rcs_simulated || 0)), h("span", null, t.rcs_simulated ? `RCS today (${t.rcs_simulated} simulated)` : "RCS today"))),
+      n.updated_by && h("p", { class: "muted small", style: "margin-bottom:0" }, `Last changed by ${n.updated_by.split(":")[1] || n.updated_by}.`));
+  }
+
   async function viewSystem() {
     const safe = (p) => get(p).catch((e) => ({ __error: e.message }));
-    const [dyna, recon, clock, stats, limits, rules] = await Promise.all([
+    const [dyna, recon, clock, stats, limits, rules, notify] = await Promise.all([
       safe("/api/staff/ops/dynastore"), safe("/api/staff/ops/reconciliation"), safe("/api/staff/ops/clock"),
-      safe("/api/staff/analytics"), safe("/api/staff/ops/rate-limits"), safe("/api/staff/ops/risk-rules")]);
+      safe("/api/staff/analytics"), safe("/api/staff/ops/rate-limits"), safe("/api/staff/ops/risk-rules"),
+      can() ? safe("/api/staff/settings/notifications") : null]);
     const failed = (x) => x.__error && h("div", { class: "notice bad" }, x.__error);
 
     const keyOut = h("div", { style: "margin-top:12px" });
@@ -1918,6 +1953,7 @@
     });
 
     return page("System", "The machinery behind the bank, live.", h("button", { class: "quiet", type: "button", onclick: render }, "Refresh"),
+      notify && section("Notifications", h("span", { class: "muted small" }, "Administrators only"), notify.__error ? failed(notify) : notificationsPanel(notify)),
       section("DynaStore: the leaderless store", h("a", { href: "/api/docs", target: "_blank", rel: "noopener" }, "API docs"), dynaPanel),
       section("Books", null, recon.__error ? failed(recon) : h("div", { class: recon.balanced ? "notice good" : "notice bad", id: "recon" },
         h("strong", null, recon.balanced ? "The ledger balances" : "The ledger does not balance"),

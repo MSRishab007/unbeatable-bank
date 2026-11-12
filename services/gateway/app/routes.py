@@ -60,6 +60,10 @@ ROUTES: list[Route] = [
     Route("GET", "/api/auth/login-history", "identity", "/v1/auth/login-history"),
     Route("POST", "/api/staff/login", "identity", "/v1/staff/login", P),
     Route("POST", "/api/staff/logout", "identity", "/v1/staff/logout", S),
+    Route("GET", "/api/staff/settings/notifications", "identity", "/v1/staff/settings/notifications", S, ("ADMIN",)),
+    Route("PATCH", "/api/staff/settings/notifications", "identity", "/v1/staff/settings/notifications", S, ("ADMIN",)),
+    Route("POST", "/api/staff/settings/notifications/resume-gmail", "identity",
+          "/v1/staff/settings/notifications/resume-gmail", S, ("ADMIN",)),
 
     # ---- PINs, password, contact details
     Route("GET", "/api/auth/pins", "identity", "/v1/auth/pins"),

@@ -681,6 +681,23 @@ with sync_playwright() as pw:
         expect(staff.locator(".node.down")).to_have_count(0)
     step("system page: three DynaStore nodes, ledger balances, cut a link and heal it", system)
 
+    def notification_switches():
+        token = api.post("/api/staff/login", json={"staff_id": "admin", "password": ADMIN_PASSWORD}).json()["access_token"]
+        api.patch("/api/staff/settings/notifications", headers={"Authorization": f"Bearer {token}"},
+                  json={"email_enabled": True, "rcs_enabled": True, "email_provider": "auto"}).raise_for_status()
+        staff.reload()
+        panel = staff.locator("#notify-settings")
+        rcs = panel.locator("[data-setting=rcs_enabled]")
+        rcs.get_by_role("button", name="Switch off").click()
+        expect(rcs).to_contain_text("Off")
+        panel.locator("select").select_option("brevo")
+        expect(staff.get_by_text("Email now goes by: Brevo only")).to_be_visible()
+        shot(staff, "15a-notification-switches")
+        staff.locator("#notify-settings [data-setting=rcs_enabled]").get_by_role("button", name="Switch on").click()
+        staff.locator("#notify-settings select").select_option("auto")       # leave it as it was
+        expect(staff.locator("#notify-settings [data-setting=rcs_enabled]")).to_contain_text("On")
+    step("admin switches RCS off and pins email to Brevo, then puts both back", notification_switches)
+
     def role_limits():
         ctx = browser.new_context()
         t = ctx.new_page()

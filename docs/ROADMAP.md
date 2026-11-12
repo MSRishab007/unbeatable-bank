@@ -294,7 +294,11 @@ E1. **OTPs and alerts over free channels**, all sent by the Notification Cloud F
 BUILT (12 Nov): every message can choose `channels` (email, rcs) besides the inbox;
 by default codes, security and fraud messages go everywhere, routine ones inbox only.
 The address and phone come from `contacts/<customer_id>` (kept by Identity).
-- Email by Gmail SMTP with an app password (`email_from` + `smtp_password`), or Brevo.
+- Email by Gmail SMTP with an app password (`email_from` + `smtp_password`) and Brevo
+  (`brevo_api_key`) together: Gmail first; at Gmail's daily limit it pauses Gmail for 24
+  hours and Brevo takes over; any other Gmail failure falls back to Brevo for that message.
+- Admin switches (staff console, System > Notifications): email on/off, RCS on/off,
+  email by automatic / Gmail only / Brevo only, "try Gmail again", today's counts.
 - RCS: real sending is written (RBM API) but not yet tried; until `rbm_agent_id` and
   `rbm_credentials` are set, RCS messages land in the Firestore collection `rcs_outbox`.
   To make it real: through a Google RCS Business Messaging *test* agent: messages to registered

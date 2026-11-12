@@ -359,3 +359,10 @@ label.check input { width: auto; min-height: 0; margin-top: 4px; }
 .stat span { color: var(--muted); font-size: 0.875rem; }
 pre.json { margin: 0; font-size: 0.82rem; overflow: auto; max-height: 320px; background: var(--sheet-2); padding: 14px; border-radius: 8px; border: 1px solid var(--rule); }
 .skeleton { color: var(--muted); padding: 28px 0; }
+
+/* Admin switches: one row per setting */
+.setting { display: flex; gap: 16px; align-items: center; justify-content: space-between; flex-wrap: wrap;
+  padding: 12px 0; border-top: 1px solid var(--rule, rgba(0, 0, 0, 0.12)); }
+.setting:first-of-type { border-top: 0; }
+.setting .main { display: grid; gap: 2px; max-width: 60ch; }
+.setting select { width: auto; }

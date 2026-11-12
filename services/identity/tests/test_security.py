@@ -401,3 +401,28 @@ def test_http_forgot_password_is_the_same_for_everyone(api, user):
     unknown = api.post("/v1/auth/password/forgot", json={"identifier": "ghost@example.com"})
     assert known.status_code == unknown.status_code == 202
     assert known.json() == unknown.json()
+
+
+# ------------------------------------------------------------------ notification switches (admin)
+
+
+def test_notification_settings_are_admin_only_and_logged(api, deps):
+    admin = {"X-Actor": "staff:admin:ADMIN"}
+    assert api.get("/v1/staff/settings/notifications", headers={"X-Actor": "staff:asha:ANALYST"}).status_code == 403
+    assert api.get("/v1/staff/settings/notifications", headers={"X-Actor": f"customer:{uuid.uuid4()}"}).status_code == 403
+    now = api.get("/v1/staff/settings/notifications", headers=admin).json()
+    assert (now["email_enabled"], now["rcs_enabled"], now["email_provider"]) == (True, True, "auto")
+    assert api.patch("/v1/staff/settings/notifications", headers=admin, json={"email_provider": "pigeon"}).status_code == 422
+    changed = api.patch("/v1/staff/settings/notifications", headers=admin,
+                        json={"rcs_enabled": False, "email_provider": "brevo"}).json()
+    assert (changed["email_enabled"], changed["rcs_enabled"], changed["email_provider"]) == (True, False, "brevo")
+    assert deps.docstore.get("settings", "notifications")["updated_by"] == "staff:admin:ADMIN"
+    assert deps.docstore.query("settings_log", {"setting": "notifications"})
+
+
+def test_gmail_pause_is_shown_and_can_be_lifted(api, deps):
+    admin = {"X-Actor": "staff:admin:ADMIN"}
+    deps.docstore.set("settings", "notifications_state", {"gmail_paused_until": deps.clock() + 3600,
+                                                          "gmail_paused_reason": "550 5.4.5 limit"})
+    assert api.get("/v1/staff/settings/notifications", headers=admin).json()["gmail_paused_until"]
+    assert api.post("/v1/staff/settings/notifications/resume-gmail", headers=admin).json()["gmail_paused_until"] is None

@@ -34,7 +34,7 @@ pip install httpx
 python scripts/smoke_test.py         # about 70 end-to-end checks through the gateway
 python loadtest/simulator.py         # fraud personas
 pip install playwright && playwright install chromium
-python scripts/ui_test.py            # 33 checks of the web app in a real browser
+python scripts/ui_test.py            # 42 checks of both web apps in a real browser
 ```
 
 Open http://localhost:8080 for the web app and http://localhost:8080/api/docs for the API.
@@ -43,8 +43,18 @@ Staff logins for local development: `admin` / `admin-dev-pass`, `analyst1` / `an
 
 ## The web app
 
-`services/gateway/static` is the whole front end: plain HTML, CSS and JavaScript
-with no build step, served by the gateway.
+Two front ends, both served by the gateway from `services/gateway/static`:
+
+- **`/`: the customer app** (`web/`): React, TypeScript, Tailwind and shadcn/ui-style
+  components, with Motion for animation (the rolling "We are Un…" headline, the
+  swipe-to-pay slider, PIN and one-time-code boxes). `make web` (or `npm run build` in
+  `web/`) builds it into `services/gateway/static`, and the build is committed, so the
+  gateway image needs no Node. `npm run dev` in `web/` serves it with hot reload against a
+  gateway on localhost:8080.
+- **`/classic/`: the original app**, plain HTML, CSS and JavaScript with no build step. It
+  has the staff console and the few customer screens not rebuilt yet (statements,
+  nominees, scan-a-QR with the camera). Both apps share the sign-in (same browser storage),
+  so a link from one to the other keeps you signed in.
 
 - **Customers:** sign up, upload KYC documents, open savings and current accounts
   (single or joint), passbook, monthly PDF statements and statements for any dates,

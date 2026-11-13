@@ -1,0 +1,76 @@
+@import "tailwindcss";
+@import "@fontsource-variable/onest";
+@import "@fontsource-variable/unbounded";
+
+/* Unbeatable Bank: cobalt and volt.
+   Cobalt is the bank (headers, the card, primary actions); volt yellow is the bolt, used
+   only for the mark and moments of "done"; go-green is reserved for money actually moving. */
+:root {
+  --ink: #0d0f2b;
+  --ink-2: #3b3e5c;
+  --muted: #6a6d88;
+  --line: #e3e5f0;
+  --mist: #f3f4fa;
+  --surface: #ffffff;
+  --cobalt: #2d2ae6;
+  --cobalt-deep: #1d1aa8;
+  --cobalt-ink: #12107a;
+  --volt: #ffd23f;
+  --go: #12a663;
+  --go-deep: #0b7a48;
+  --danger: #dc3b45;
+  --warn: #c98a07;
+  --warn-bg: #fff6dd;
+  --good-bg: #e3f6ec;
+  --bad-bg: #fde8ea;
+  --ring: #2d2ae6;
+}
+
+@theme inline {
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-mist: var(--mist);
+  --color-surface: var(--surface);
+  --color-cobalt: var(--cobalt);
+  --color-cobalt-deep: var(--cobalt-deep);
+  --color-cobalt-ink: var(--cobalt-ink);
+  --color-volt: var(--volt);
+  --color-go: var(--go);
+  --color-go-deep: var(--go-deep);
+  --color-danger: var(--danger);
+  --color-warn: var(--warn);
+  --color-warn-bg: var(--warn-bg);
+  --color-good-bg: var(--good-bg);
+  --color-bad-bg: var(--bad-bg);
+  --font-sans: "Onest Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Unbounded Variable", "Onest Variable", ui-sans-serif, sans-serif;
+  --radius-card: 22px;
+}
+
+html { -webkit-text-size-adjust: 100%; }
+body {
+  background: var(--mist);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-feature-settings: "tnum" 1, "cv11" 1;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+::selection { background: var(--volt); color: var(--ink); }
+:focus-visible { outline: 2.5px solid var(--ring); outline-offset: 2px; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; }
+
+.num { font-variant-numeric: tabular-nums; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}
+
+@keyframes fade-in { from { opacity: 0; } }
+@keyframes sheet-up { from { transform: translateY(100%); } }
+@keyframes pop-in { from { opacity: 0; transform: translate(-50%, -48%) scale(.97); } }
+@keyframes caret { 50% { opacity: 0; } }
+@keyframes shimmer { from { background-position: -200% 0; } to { background-position: 200% 0; } }

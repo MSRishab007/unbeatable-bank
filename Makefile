@@ -31,7 +31,7 @@ export ANALYST2_PASSWORD ?= $(call staff_pw,analyst2)
 export TELLER_PASSWORD   ?= $(call staff_pw,teller1)
 export KYC_PASSWORD      ?= $(call staff_pw,kyc1)
 
-.PHONY: help init up down flink-up flink-down kubeconfig url dns email-test status argocd grafana prometheus smoke ui-test loadtest simulate logs destroy check-project
+.PHONY: web help init up down flink-up flink-down kubeconfig url dns email-test status argocd grafana prometheus smoke ui-test loadtest simulate logs destroy check-project
 
 help:
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-12s %s\n", $$1, $$2}'
@@ -107,6 +107,9 @@ prometheus: ## Prometheus on port 9090, to query metrics directly (Cloud Shell: 
 
 smoke: ## end-to-end check against the deployed system (staff passwords come from infra/main/terraform.tfvars)
 	python scripts/smoke_test.py $(BASE_URL) --skip-eod
+
+web: ## build the customer app (web/) into services/gateway/static; commit the result
+	cd web && npm ci && npm run build
 
 ui-test: ## browser test of the web app against the deployed system (needs playwright)
 	python scripts/ui_test.py --base-url $(BASE_URL)

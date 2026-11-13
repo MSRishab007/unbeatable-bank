@@ -23,6 +23,28 @@ jobs:
       - run: python scripts/gen_protos.py
       - run: git diff --exit-code -- libs/common/ubproto
 
+  web:
+    # The customer app (web/, React). Type-checks and builds it; the gateway serves the build
+    # committed in services/gateway/static, so a stale one is flagged.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - name: Is the committed build up to date?
+        run: |
+          if ! git diff --quiet -- services/gateway/static; then
+            echo "::warning::services/gateway/static differs from a fresh build of web/. Run 'make web' and commit."
+            git status --short -- services/gateway/static | head -20
+          fi
+
   manifests:
     # Fails if deploy/bank does not match scripts/gen_manifests.py, and checks every manifest's schema.
     runs-on: ubuntu-latest

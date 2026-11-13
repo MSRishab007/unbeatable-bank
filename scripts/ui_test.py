@@ -30,6 +30,8 @@ ap.add_argument("--shots", default="", help="folder for screenshots (optional)")
 ap.add_argument("--headed", action="store_true")
 args = ap.parse_args()
 BASE = args.base_url.rstrip("/")
+# The staff console and the flows tested here run in the classic app; the new app is at "/".
+UI = BASE + "/classic"
 SHOTS = Path(args.shots) if args.shots else None
 if SHOTS:
     SHOTS.mkdir(parents=True, exist_ok=True)
@@ -157,7 +159,7 @@ with sync_playwright() as pw:
     print(f"\nWeb app at {BASE}\n\n1. Sign-up and KYC")
 
     def sign_up():
-        page.goto(BASE + "/")
+        page.goto(UI + "/")
         expect(page.get_by_role("heading", name="Sign in")).to_be_visible()
         shot(page, "01-sign-in")
         page.get_by_role("button", name="Open an account").click()
@@ -180,7 +182,7 @@ with sync_playwright() as pw:
 
     def wrong_password():
         other = customer_ctx.new_page()
-        other.goto(BASE + "/")
+        other.goto(UI + "/")
         other.get_by_label("Email or mobile number").fill(email)
         other.get_by_label("Password").fill("not-the-password")
         other.get_by_role("button", name="Sign in", exact=True).last.click()
@@ -216,7 +218,7 @@ with sync_playwright() as pw:
     step("customer uploads PAN and address proof; a disguised program is refused", upload_documents)
 
     def staff_review():
-        staff.goto(BASE + "/#/staff")
+        staff.goto(UI + "/#/staff")
         staff.get_by_label("Staff ID").fill("kyc1")
         staff.get_by_label("Password").fill(os.getenv("KYC_PASSWORD", "kyc-dev-pass"))
         staff.get_by_role("button", name="Sign in to the staff console").click()
@@ -308,12 +310,12 @@ with sync_playwright() as pw:
         ctx = payee_browser()
         p2 = ctx.new_page()
         watch(p2, "payee")
-        p2.goto(BASE + "/")
+        p2.goto(UI + "/")
         p2.get_by_label("Email or mobile number").fill(payee["email"])
         p2.get_by_label("Password").fill(PASSWORD)
         p2.get_by_role("button", name="Sign in", exact=True).last.click()
         expect(p2.get_by_role("heading", name="Namaste, Ravi")).to_be_visible()
-        p2.goto(BASE + "/#/receive")
+        p2.goto(UI + "/#/receive")
         p2.get_by_label("Amount").fill("250")
         expect(p2.locator("#pay-link")).to_have_value(re.compile(r"#/pay\?to=" + payee["account_number"] + r"&amount=250\.00"))
         p2.locator("#qr").screenshot(path=str(qr_png))
@@ -376,7 +378,7 @@ with sync_playwright() as pw:
         globals()["laptop"] = laptop
         watch(laptop, "laptop")
         laptop.set_default_timeout(10_000)
-        laptop.goto(BASE + "/#/pay")
+        laptop.goto(UI + "/#/pay")
         laptop.get_by_label("Email or mobile number").fill(phone)          # mobile number works as well as email
         laptop.get_by_label("Password").fill(PASSWORD)
         laptop.get_by_role("button", name="Sign in", exact=True).last.click()
@@ -593,7 +595,7 @@ with sync_playwright() as pw:
         ctx = browser.new_context()                                        # a lender: not signed in
         lender = ctx.new_page()
         watch(lender, "lender")
-        lender.goto(BASE + "/")
+        lender.goto(UI + "/")
         lender.get_by_role("button", name="Check it is genuine").click()
         lender.locator("#statement-file").set_input_files(str(files / "statement.pdf"))
         expect(lender.locator("#statement-check-result")).to_contain_text("Genuine")
@@ -702,7 +704,7 @@ with sync_playwright() as pw:
         ctx = browser.new_context()
         t = ctx.new_page()
         watch(t, "teller")
-        t.goto(BASE + "/#/staff")
+        t.goto(UI + "/#/staff")
         t.get_by_label("Staff ID").fill("teller1")
         t.get_by_label("Password").fill(os.getenv("TELLER_PASSWORD", "teller-dev-pass"))
         t.get_by_role("button", name="Sign in to the staff console").click()
@@ -717,7 +719,7 @@ with sync_playwright() as pw:
         ctx = payee_browser(**pw.devices["Pixel 7"])
         m = ctx.new_page()
         watch(m, "phone")
-        m.goto(BASE + "/")
+        m.goto(UI + "/")
         shot(m, "20-phone-sign-in")
         m.get_by_label("Email or mobile number").fill(payee["email"])
         m.get_by_label("Password").fill(PASSWORD)
@@ -725,7 +727,7 @@ with sync_playwright() as pw:
         expect(m.get_by_role("heading", name="Namaste, Ravi")).to_be_visible()
         for path, name in [("accounts", "21-phone-home"), ("pay", "22-phone-pay"), ("deposits", "23-phone-deposits"),
                            (f"accounts/{payee['account_id']}", "24-phone-passbook"), ("security", "25-phone-security")]:
-            m.goto(f"{BASE}/#/{path}")
+            m.goto(f"{UI}/#/{path}")
             expect(m.locator("main h1")).to_be_visible()
             m.wait_for_timeout(300)
             overflow = m.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth")
@@ -737,18 +739,45 @@ with sync_playwright() as pw:
         ctx.close()
     step("every customer page fits a phone without sideways scrolling; sign-out works", phone_layout)
 
-    print("\n8. Block everything")
+    print("\n8. The new app (React, at /)")
+
+    def new_app():
+        ctx = payee_browser(viewport={"width": 390, "height": 844})
+        n = ctx.new_page()
+        watch(n, "new-app")
+        n.goto(BASE + "/")
+        expect(n.get_by_role("heading", name=re.compile("We are"))).to_be_visible()
+        shot(n, "27-new-landing")
+        n.goto(BASE + "/#/signin")
+        n.locator("#identifier").fill(payee["email"])
+        n.locator("#password").fill(PASSWORD)
+        n.get_by_role("button", name="Sign in", exact=True).click()
+        expect(n.get_by_text("Ravi", exact=True)).to_be_visible()
+        shot(n, "28-new-home")
+        n.goto(BASE + "/#/pay")
+        n.locator("#payee").fill(f"asha{RUN}@unbeatable")
+        expect(n.get_by_role("button", name="Change who you're paying")).to_be_visible()
+        n.locator("#amount").fill("10")
+        n.get_by_role("button", name=re.compile("Swipe to pay")).press("Enter")      # the slider's keyboard path
+        n.get_by_role("dialog").locator("input").fill(PAY_PIN)
+        expect(n.locator("#payment-result")).to_be_visible()
+        expect(n.locator("#payment-result .stamp")).to_have_text(re.compile("Paid|Confirm it's you|Under review"))
+        shot(n, "29-new-paid")
+        ctx.close()
+    step("the new app: landing, sign-in, and a payment with the slider and PIN", new_app)
+
+    print("\n9. Block everything")
 
     def block_everything():
         ctx = payee_browser(viewport={"width": 1280, "height": 900})
         r = ctx.new_page()
         watch(r, "ravi")
-        r.goto(BASE + "/")
+        r.goto(UI + "/")
         r.get_by_label("Email or mobile number").fill(payee["email"])
         r.get_by_label("Password").fill(PASSWORD)
         r.get_by_role("button", name="Sign in", exact=True).last.click()
         expect(r.get_by_role("heading", name="Namaste, Ravi")).to_be_visible()
-        r.goto(BASE + "/#/security")
+        r.goto(UI + "/#/security")
         r.get_by_role("button", name="Block everything").click()
         r.locator("dialog input[name=sure]").check()
         shot(r, "26-block-everything")

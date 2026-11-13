@@ -362,9 +362,12 @@ cannot run anything in the bank's origin.
 
 ### Web application
 
-One static front end (`services/gateway/static`, plain HTML, CSS and JavaScript with no
-build step) served by the API Gateway, so there is no second public endpoint and no
-cross-origin configuration. It has a customer side (accounts, passbook, payments by
+Static front ends served by the API Gateway, so there is no second public endpoint and no
+cross-origin configuration. The customer app at `/` is React and TypeScript (`web/`,
+built with Vite into `services/gateway/static`); the original plain-JavaScript app at
+`/classic/` keeps the staff console. Both keep the same session in `sessionStorage`. The
+build inlines nothing (fonts are files, not `data:` URIs), so the strict
+Content-Security-Policy stays unchanged. It has a customer side (accounts, passbook, payments by
 number, pay ID or QR code, deposits, inbox, security) and a staff console (fraud desk,
 approvals, branch desk, system). Each payment is shown as a slip listing the checks it
 passed (duplicate check, rate limits, account and payee, limits, risk engine, ledger)

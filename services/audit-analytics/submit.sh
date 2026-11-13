@@ -55,9 +55,12 @@ ZONE=$(curl -sf -H "Metadata-Flavor: Google" \
   http://metadata.google.internal/computeMetadata/v1/instance/zone | awk -F/ '{print $NF}')
 BOOTSTRAP=""
 for _ in $(seq 1 30); do
+  # Filtered here, not with --filter: the Compute API rejects the server-side filter
+  # gcloud builds for "tags.items=... AND status=..." ("Invalid list filter expression").
   BOOTSTRAP=$(gcloud compute instances list --zones "$ZONE" \
-    --filter="tags.items=${NODE_TAG} AND status=RUNNING" \
-    --format="value(networkInterfaces[0].networkIP)" | sed "s/$/:${NODEPORT}/" | paste -sd, -)
+      --format="value(networkInterfaces[0].networkIP,status,tags.items.list(separator=' '))" 2>/dev/null \
+    | awk -v tag="$NODE_TAG" '$2 == "RUNNING" { for (i = 3; i <= NF; i++) if ($i == tag) print $1 }' \
+    | sed "s/$/:${NODEPORT}/" | paste -sd, -)
   [[ -n "$BOOTSTRAP" ]] && break
   echo "no running GKE nodes yet; retrying"
   sleep 10

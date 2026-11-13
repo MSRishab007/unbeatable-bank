@@ -55,6 +55,10 @@ resource "google_dataproc_cluster" "flink" {
       tags             = ["ub-dataproc"]
       internal_ip_only = false # needs the internet once, to download the Kafka connector
 
+      # Access is limited by the service account's roles; the scope just lets it use them
+      # (submit.sh calls the Compute API to find the GKE nodes).
+      service_account_scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+
       metadata = {
         job-bucket     = google_storage_bucket.flink.name
         kafka-nodeport = tostring(var.kafka_bootstrap_nodeport)

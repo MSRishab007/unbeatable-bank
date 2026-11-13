@@ -277,12 +277,14 @@ The same SQL runs in CI on a local Flink mini-cluster with file-backed tables.
 
 ## 9. Scalability, resilience and observability
 
-- **Autoscaling.** HPAs on gateway, intake and risk scale on 60% CPU between 1 and
-  4-6 replicas. Services are stateless; shared state is in DynaStore, PostgreSQL or
+- **Autoscaling.** HPAs on gateway, identity, intake, account, ledger and risk scale on
+  60% CPU between 1 and 2-6 replicas (the database services are capped so their
+  connections stay under Cloud SQL's 100). Services are stateless; shared state is in DynaStore, PostgreSQL or
   Kafka, so any replica can serve any request.
-- **Health.** `/healthz` (liveness) never touches a dependency; `/readyz`
-  (readiness) does, so a database outage takes pods out of rotation instead of
-  restart-looping them.
+- **Health.** `/healthz` (liveness) never touches a dependency and is answered on the
+  event loop, so a busy pod is never restarted. `/readyz` checks that the connection
+  pool is open without queueing for a connection: in the load test, a readiness query
+  queued behind real requests timed out and took busy-but-healthy pods out of service.
 - **Retries are safe everywhere.** Idempotency keys at the gateway API, in Intake,
   in the Ledger, in deposits and in the end-of-day batch.
 - **Metrics.** Every service exposes Prometheus metrics for request rate, error rate

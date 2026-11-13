@@ -23,7 +23,7 @@ __pycache__/
 bin/
 vendor/
 # ...except the web app's two third-party scripts, which are part of the source (no build step)
-!services/gateway/static/vendor/
+!services/gateway/static/classic/vendor/
 
 # OS / editors
 .DS_Store

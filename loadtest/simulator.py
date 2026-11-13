@@ -228,13 +228,26 @@ def mule_ring():
     payment looks odd; only the stream analytics job sees the pattern."""
     mule = Person("Mule Account")
     victims = [Person(f"Victim {i}", 20_000 * RS) for i in range(6)]
-    for v in victims:
-        v.pay(mule.number, 9_000)
-    print("    6 different customers each sent Rs 9,000 to one account; waiting for the Flink window ...")
-    alert = wait_for(lambda: next((a for a in G.get("/api/staff/alerts", headers=ANALYST).json()
-                                   if a.get("account_id") == mule.account_id), None), timeout=150)
+    statuses = [v.pay(mule.number, 9_000)["status"] for v in victims]
+    print(f"    6 different customers each sent Rs 9,000 to one account: {statuses}")
+    print("    waiting for the Flink window to close ...")
+    # Flink's windows run on event time: a window closes only when a *later* payment shows
+    # that its time has passed (the watermark). In a real bank payments never stop; here
+    # an ordinary shopper keeps paying every 10 s (well under every velocity rule) so the
+    # stream keeps moving after the mule payments.
+    shopper, shop = Person("Steady Shopper", 20_000 * RS), Person("Grocery Store")
+    last = [0.0]
+
+    def mule_alert():
+        if time.monotonic() - last[0] >= 10:
+            shopper.pay(shop.number, 50)
+            last[0] = time.monotonic()
+        return next((a for a in G.get("/api/staff/alerts", headers=ANALYST).json()
+                     if a.get("account_id") == mule.account_id), None)
+
+    alert = wait_for(mule_alert, timeout=240)
     report("mule ring", bool(alert), "Audit Analytics (Flink, 10-minute fan-in window) -> Fraud Alert",
-           f"alert: {alert.get('title') if alert else 'none within 150 s (is the Flink job running?)'}")
+           f"alert: {alert.get('title') if alert else 'none within 240 s (is the Flink job running?)'}")
 
 
 PERSONAS = {"normal": normal, "bot": bot, "stolen-password": stolen_password, "takeover": takeover, "probing": probing,

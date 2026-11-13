@@ -84,6 +84,29 @@ esac
 JAR="$JOB_DIR/$(basename "$JAR_URL")"
 [[ -f "$JAR" ]] || curl -sfL -o "$JAR" "$JAR_URL"
 echo "flink $FLINK_VERSION, connector $(basename "$JAR")"
+JARS=(-j "$JAR")
+
+# The 1.17 Kafka connector uses Flink's shaded Guava 30 (org.apache.flink.shaded.guava30),
+# which Dataproc's Flink 1.17 doesn't ship: the job failed with NoClassDefFoundError
+# .../guava30/com/google/common/io/Closer. Ship that jar with the job. Its package name
+# includes the version, so it can't clash with the Guava Flink itself uses.
+if [[ "$FLINK_VERSION" == 1.17.* ]] && \
+   ! unzip -l "$FLINK_HOME"/lib/flink-dist*.jar 2>/dev/null | grep -q 'shaded/guava30/com/google/common/io/Closer'; then
+  GUAVA=""
+  for v in 30.1.1-jre-16.1 30.1.1-jre-16.2 30.1.1-jre-16.0 30.1.1-jre-15.0; do
+    f="$JOB_DIR/flink-shaded-guava-$v.jar"
+    if [[ -s "$f" ]] || curl -sfL -o "$f" "https://repo1.maven.org/maven2/org/apache/flink/flink-shaded-guava/$v/flink-shaded-guava-$v.jar"; then
+      GUAVA="$f"; break
+    fi
+    rm -f "$f"
+  done
+  if [[ -n "$GUAVA" ]]; then
+    echo "adding $(basename "$GUAVA") for the connector"
+    JARS+=(-j "$GUAVA")
+  else
+    echo "WARNING: could not download flink-shaded-guava 30; the Kafka sink may fail"
+  fi
+fi
 
 # One SQL script: tables, views, then the statement set that starts the job.
 SQL="$JOB_DIR/job.sql"
@@ -106,5 +129,5 @@ if ! yarn application -list 2>/dev/null | grep -q audit-analytics; then
     -Dparallelism.default=1
   sleep 15
 fi
-"$FLINK_HOME/bin/sql-client.sh" -j "$JAR" -f "$SQL"
+"$FLINK_HOME/bin/sql-client.sh" "${JARS[@]}" -f "$SQL"
 echo "=== $(date -Is) submitted. Check with: yarn application -list ; flink list"

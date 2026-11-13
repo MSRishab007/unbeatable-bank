@@ -4,6 +4,10 @@
 SET 'pipeline.name' = 'audit-analytics';
 SET 'execution.runtime-mode' = 'streaming';
 SET 'parallelism.default' = '1';
+-- Also for every table operator: Dataproc computes the cluster's default parallelism from
+-- its worker count, and on a single-node cluster that comes out as 0, which Flink rejects
+-- ("Parallelism must be at least one").
+SET 'table.exec.resource.default-parallelism' = '1';
 
 -- State (open windows, distinct-count sets) is checkpointed to Cloud Storage,
 -- so a restarted job resumes its windows instead of losing them.

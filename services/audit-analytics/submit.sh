@@ -91,9 +91,19 @@ cat "$JOB_DIR"/sql/00_kafka_tables.sql "$JOB_DIR"/sql/10_views.sql "$JOB_DIR"/sq
   | sed -e "s|\${KAFKA_BOOTSTRAP}|${BOOTSTRAP}|g" \
         -e "s|\${CHECKPOINT_DIR}|gs://${BUCKET}/checkpoints/audit-analytics|g" >"$SQL"
 
+# Dataproc derives parallelism.default from the number of workers; with zero workers
+# (single-node cluster) it can come out as 0, and Flink refuses to run anything.
+CONF="$FLINK_HOME/conf/flink-conf.yaml"
+if grep -qE '^parallelism\.default:[[:space:]]*(0|-[0-9]+)[[:space:]]*$' "$CONF" 2>/dev/null; then
+  echo "fixing parallelism.default in $CONF ($(grep '^parallelism.default' "$CONF"))"
+  sed -i -E 's/^parallelism\.default:.*/parallelism.default: 1/' "$CONF"
+fi
+echo "flink-conf: $(grep -E '^parallelism\.default' "$CONF" 2>/dev/null || echo 'parallelism.default not set')"
+
 # A long-running Flink session on YARN, then the SQL client submits the job to it.
 if ! yarn application -list 2>/dev/null | grep -q audit-analytics; then
-  "$FLINK_HOME/bin/yarn-session.sh" -d -nm audit-analytics -jm 1024m -tm 2048m -s 2
+  "$FLINK_HOME/bin/yarn-session.sh" -d -nm audit-analytics -jm 1024m -tm 2048m -s 2 \
+    -Dparallelism.default=1
   sleep 15
 fi
 "$FLINK_HOME/bin/sql-client.sh" -j "$JAR" -f "$SQL"

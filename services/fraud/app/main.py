@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
-from ubcommon.dbpool import connection_dependency
+from ubcommon.dbpool import connection_dependency, readiness
 from ubcommon.auth import parse_actor
 from ubcommon.docstore import get_docstore
 from ubcommon.logging_setup import setup_logging
@@ -141,10 +141,8 @@ async def healthz():
     return {"status": "ok"}
 
 
-@app.get("/readyz")
-def readyz(conn=Depends(get_conn)):
-    conn.execute("SELECT 1")
-    return {"status": "ready"}
+# Ready while the pool is open; no query, so a busy pod isn't taken out (ubcommon.dbpool).
+app.get("/readyz")(readiness(lambda: _state["pool"]))
 
 
 # ----------------------------------------------------------------- customers

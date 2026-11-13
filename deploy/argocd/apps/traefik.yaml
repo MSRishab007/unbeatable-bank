@@ -37,8 +37,8 @@ spec:
               matchLabels:
                 app.kubernetes.io/name: traefik
         resources:
-          requests: { cpu: 100m, memory: 64Mi }
-          limits: { memory: 256Mi }
+          requests: { cpu: 100m, memory: 128Mi }
+          limits: { memory: 512Mi }  # TLS for a few hundred clients at once
         # When a pod is stopped (scaling in, moving nodes), keep serving for 15 s while the
         # load balancer notices, so clients don't get "connection reset".
         ports:

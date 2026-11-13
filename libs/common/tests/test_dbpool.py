@@ -61,3 +61,23 @@ def test_the_plain_dependency_really_does_deadlock(pool):
 def test_a_request_that_waits_too_long_gets_503(pool):
     app = app_with(connection_dependency(lambda: pool, wait_seconds=0.01))
     assert asyncio.run(fire(app, 60)) < 60
+
+
+def test_readiness_follows_the_pool_without_a_query():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from ubcommon.dbpool import readiness
+
+    class FakePool:
+        closed = False
+
+    state = {}
+    app = FastAPI()
+    app.get("/readyz")(readiness(lambda: state["pool"]))
+    client = TestClient(app)
+    assert client.get("/readyz").status_code == 503      # not started
+    state["pool"] = FakePool()
+    assert client.get("/readyz").status_code == 200
+    state["pool"].closed = True
+    assert client.get("/readyz").status_code == 503

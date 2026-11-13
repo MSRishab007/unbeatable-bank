@@ -55,3 +55,24 @@ def connection_dependency(get_pool: Callable, wait_seconds: float = 10.0):
             gate.release()
 
     return get_conn
+
+
+def readiness(get_pool: Callable):
+    """`app.get("/readyz")(readiness(lambda: _state["pool"]))`: ready while the pool is open.
+
+    It doesn't run a query through get_conn: under load every connection is busy, so a
+    probe would queue behind the requests, time out, and take a pod that is working (just
+    busy) out of the Service, which sends its share of the traffic to the others and makes
+    things worse. A pod whose database is really gone fails its requests with 503 anyway.
+    """
+
+    async def readyz():
+        try:
+            pool = get_pool()
+        except Exception:  # noqa: BLE001 - not started yet
+            pool = None
+        if pool is None or pool.closed:
+            raise HTTPException(status_code=503, detail="database pool not open")
+        return {"status": "ready"}
+
+    return readyz

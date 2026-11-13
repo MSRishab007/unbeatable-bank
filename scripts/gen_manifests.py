@@ -86,8 +86,10 @@ SERVICES: dict[str, dict] = {
     # identity is on every request's path now (session check) and every payment's (PIN).
     "identity": {"db": True, "outbox": True, "secrets": ["JWT_SECRET", "STAFF_BOOTSTRAP"], "gcp": True, "hpa": (1, 4),
                  "infra": {"GCS_BUCKET": "KYC_BUCKET"}},       # its bucket is the KYC one, not the reports one
-    "account": {"db": True, "outbox": True},
-    "ledger": {"db": True, "outbox": True, "grpc": 50051, "env": {"GRPC_PORT": "50051"}},
+    # account and ledger serve most reads (accounts, statements); scale them with load.
+    # Database connections at full scale stay under Cloud SQL's 100: each pod has 4 + 1 (outbox).
+    "account": {"db": True, "outbox": True, "hpa": (1, 3)},
+    "ledger": {"db": True, "outbox": True, "hpa": (1, 2), "grpc": 50051, "env": {"GRPC_PORT": "50051"}},
     "intake": {"db": True, "outbox": True, "hpa": (1, 6)},
     "ratelimit": {"grpc": 50052, "config": "config", "env": {"GRPC_PORT": "50052"}},
     "risk": {"grpc": 50053, "config": "config", "hpa": (1, 5), "env": {"GRPC_PORT": "50053"}},

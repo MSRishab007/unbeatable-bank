@@ -97,7 +97,7 @@
       "type": "prometheus",
       "uid": "${datasource}"
      },
-     "expr": "sum(rate(http_requests_total{status=~\"5..\"}[1m])) / clamp_min(sum(rate(http_requests_total[1m])), 0.001)",
+     "expr": "(sum(rate(http_requests_total{status=~\"5..\"}[1m])) or vector(0)) / clamp_min(sum(rate(http_requests_total[1m])), 0.001)",
      "legendFormat": "errors",
      "refId": "A"
     }

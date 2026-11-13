@@ -7,7 +7,6 @@ metadata:
     app: ledger
     app.kubernetes.io/part-of: unbeatable-bank
 spec:
-  replicas: 1
   selector:
     matchLabels:
       app: ledger
@@ -152,6 +151,37 @@ spec:
   - name: grpc
     port: 50051
     targetPort: grpc
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ledger
+  labels:
+    app: ledger
+    app.kubernetes.io/part-of: unbeatable-bank
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ledger
+  minReplicas: 1
+  maxReplicas: 2
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 60
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Pods
+        value: 2
+        periodSeconds: 30
+    scaleDown:
+      stabilizationWindowSeconds: 120
 ---
 apiVersion: batch/v1
 kind: Job

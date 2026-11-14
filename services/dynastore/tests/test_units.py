@@ -3,6 +3,8 @@
 import itertools
 import time
 
+import conftest
+
 from app import crdt
 from app.ring import Ring
 
@@ -87,3 +89,14 @@ def test_adding_a_node_moves_only_a_fraction_of_keys():
     keys = [f"key-{i}" for i in range(5_000)]
     moved = sum(before.preference_list(k, 1) != after.preference_list(k, 1) for k in keys)
     assert moved / len(keys) < 0.30  # ideal is 1/6; naive modulo hashing would move ~83%
+
+
+def test_cluster_assigns_distinct_ports_even_if_free_port_repeats(monkeypatch, tmp_path):
+    ports = iter([41001, 41001, 41002, 41003, 41004, 41005])
+    monkeypatch.setattr(conftest, "free_port", lambda: next(ports))
+    monkeypatch.setattr(conftest.Cluster, "start", lambda self, node_id: None)
+
+    cluster = conftest.Cluster(tmp_path, size=5)
+    assigned = [int(addr.rsplit(":", 1)[1]) for addr in cluster.peers.values()]
+
+    assert len(set(assigned)) == 5

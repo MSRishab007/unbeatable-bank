@@ -277,8 +277,24 @@ def dynastore() -> list[dict]:
 
 def eod_cronjob() -> dict:
     """End-of-day at 00:05 India time: interest accrual, RD installments, FD maturities."""
-    script = ("import urllib.request; r = urllib.request.urlopen(urllib.request.Request("
-              "'http://deposits:8080/internal/v1/eod/run', method='POST'), timeout=600); print(r.read().decode())")
+    # Retries for up to ~10 minutes: right after `make up`, or when a Spot node is replaced, DNS
+    # and the deposits pod may not be ready yet ("Temporary failure in name resolution"). The
+    # run itself is idempotent per business date, so calling it again is safe.
+    script = "\n".join([
+        "import time, urllib.request, urllib.error",
+        "for attempt in range(1, 21):",
+        "    try:",
+        "        r = urllib.request.urlopen(urllib.request.Request('http://deposits:8080/internal/v1/eod/run', method='POST'), timeout=600)",
+        "        print(r.read().decode()); break",
+        "    except urllib.error.HTTPError as e:",
+        "        if e.code < 500: raise",
+        "        print(f'attempt {attempt}: deposits answered {e.code}; retrying in 30 s', flush=True)",
+        "    except (urllib.error.URLError, OSError) as e:",
+        "        print(f'attempt {attempt}: {e}; retrying in 30 s', flush=True)",
+        "    time.sleep(30)",
+        "else:",
+        "    raise SystemExit('deposits never answered')",
+    ])
     return {
         "apiVersion": "batch/v1", "kind": "CronJob", "metadata": {"name": "end-of-day", "labels": labels("deposits")},
         "spec": {"schedule": "5 0 * * *", "timeZone": "Asia/Kolkata", "concurrencyPolicy": "Forbid",

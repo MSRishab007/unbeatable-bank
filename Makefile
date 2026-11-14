@@ -31,7 +31,7 @@ export ANALYST2_PASSWORD ?= $(call staff_pw,analyst2)
 export TELLER_PASSWORD   ?= $(call staff_pw,teller1)
 export KYC_PASSWORD      ?= $(call staff_pw,kyc1)
 
-.PHONY: web help init up down flink-up flink-down kubeconfig url dns email-test status argocd grafana prometheus smoke ui-test loadtest simulate logs destroy check-project
+.PHONY: ipv4 web help init up down flink-up flink-down kubeconfig url dns email-test status argocd grafana prometheus smoke ui-test loadtest simulate logs destroy check-project
 
 help:
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-12s %s\n", $$1, $$2}'
@@ -39,7 +39,12 @@ help:
 check-project:
 	@test -n "$(PROJECT)" || { echo "Set project_id in infra/main/terraform.tfvars first (see docs/DEPLOY.md)"; exit 1; }
 
-init: check-project ## initialise Terraform (once per machine)
+ipv4: # Cloud Shell sometimes resolves Google APIs to IPv6, which it can't route ("cannot assign requested address")
+	@if [ "$$CLOUD_SHELL" = "true" ] && [ "$$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null)" != "1" ]; then \
+		sudo -n sysctl -q -w net.ipv6.conf.all.disable_ipv6=1 net.ipv6.conf.default.disable_ipv6=1 \
+		&& echo "IPv6 turned off in this Cloud Shell (it can't reach Google APIs over IPv6)" || true; fi
+
+init: check-project ipv4 ## initialise Terraform (once per machine)
 	$(TF_MAIN) init -input=false -backend-config="bucket=$(STATE_BUCKET)"
 	$(TF_PLATFORM) init -input=false -backend-config="bucket=$(STATE_BUCKET)"
 
@@ -52,7 +57,7 @@ up: init ## start the cluster, database and all services
 	@echo "ArgoCD is now deploying from Git. Watch with: make status    Public URL: make url"
 	@echo "The DuckDNS name follows the new IP within ~2 minutes of the load balancer getting one."
 
-down: check-project ## stop everything that costs money (data is kept)
+down: check-project ipv4 ## stop everything that costs money (data is kept)
 	@# The load balancer bills even with zero nodes, so remove it first. ArgoCD would put it straight
 	@# back (self-heal), so pause ArgoCD first; `make up` starts it again and it recreates the Service.
 	@# The HTTPS certificate is a Secret in the cluster, so it is kept and not issued again.
@@ -64,10 +69,10 @@ down: check-project ## stop everything that costs money (data is kept)
 	-kubectl -n bank delete service gateway-public edge --ignore-not-found --timeout=120s
 	$(TF_MAIN) apply -auto-approve -var node_count=0 -var sql_running=false -var flink_enabled=false
 
-flink-up: check-project ## create the Dataproc cluster and start the Flink job (~$0.20/hour extra)
+flink-up: check-project ipv4 ## create the Dataproc cluster and start the Flink job (~$0.20/hour extra)
 	$(TF_MAIN) apply -auto-approve -var node_count=$(NODES) -var sql_running=true -var flink_enabled=true
 
-flink-down: check-project ## delete the Dataproc cluster (the job resumes from its checkpoint next time)
+flink-down: check-project ipv4 ## delete the Dataproc cluster (the job resumes from its checkpoint next time)
 	$(TF_MAIN) apply -auto-approve -var node_count=$(NODES) -var sql_running=true -var flink_enabled=false
 
 kubeconfig: check-project ## point kubectl at the cluster

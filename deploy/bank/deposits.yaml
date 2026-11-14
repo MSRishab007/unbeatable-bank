@@ -188,8 +188,20 @@ spec:
             command:
             - python
             - -c
-            - import urllib.request; r = urllib.request.urlopen(urllib.request.Request('http://deposits:8080/internal/v1/eod/run',
-              method='POST'), timeout=600); print(r.read().decode())
+            - |-
+              import time, urllib.request, urllib.error
+              for attempt in range(1, 21):
+                  try:
+                      r = urllib.request.urlopen(urllib.request.Request('http://deposits:8080/internal/v1/eod/run', method='POST'), timeout=600)
+                      print(r.read().decode()); break
+                  except urllib.error.HTTPError as e:
+                      if e.code < 500: raise
+                      print(f'attempt {attempt}: deposits answered {e.code}; retrying in 30 s', flush=True)
+                  except (urllib.error.URLError, OSError) as e:
+                      print(f'attempt {attempt}: {e}; retrying in 30 s', flush=True)
+                  time.sleep(30)
+              else:
+                  raise SystemExit('deposits never answered')
             resources:
               requests:
                 cpu: 20m

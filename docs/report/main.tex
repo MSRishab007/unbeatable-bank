@@ -355,125 +355,392 @@ A single command stops the environment between working sessions. It scales the n
 \section{Microservices Architecture}
 \label{sec:microservices}
 
+This section describes how \project{} is divided into services, what each service is responsible for, and how the services cooperate to process a payment. It closes with the client applications that customers and staff use.
+
 \subsection{Service Decomposition}
-\plan{This subsection presents the twelve services and the calls between them in one figure. It explains the principle behind the decomposition, which is that each service owns one business capability and its own data, and that the eight services suggested for the scenario are extended with four services that make the bank complete.}
+\label{sec:decomposition}
+
+\project{} consists of twelve services. \Cref{fig:services} shows them with the calls between them. The decomposition follows business capabilities. Each service owns one capability of the bank, such as accounts, money movement or risk scoring. Each service also owns its data, and no other service reads or writes that data directly. A service that needs information from another service asks for it through the API of that service or learns it from an event.
+
+This ownership has two benefits. First, a team can change the internal design of a service without breaking the others, as long as its API stays compatible. Second, each service can scale and fail independently. A slow risk engine, for example, cannot corrupt the ledger, because the ledger accepts changes only through its own interface.
+
+Ten of the services run as containers on GKE. They are written in Python 3.12. They offer REST interfaces built with FastAPI, and four of them also offer gRPC interfaces. Every service exposes three standard endpoints. The \code{/healthz} endpoint reports that the process is alive. The \code{/readyz} endpoint reports that the service can accept traffic. The \code{/metrics} endpoint publishes Prometheus metrics. The Notification Service runs as a Cloud Function, and the Audit Analytics Service runs as a Flink job on Dataproc.
 
 \mermaidplaceholder{services}{Microservices of \project{} and the interactions between them.}{The gateway calls the services over REST. Intake calls Rate Limit, Risk and Ledger over gRPC. Rate Limit and Risk use DynaStore. Kafka carries events to Flink and Fraud Alert, and Pub/Sub carries notifications to the Cloud Function.}{8cm}
 
 \subsection{Service Responsibilities}
-\plan{This subsection describes each service in its own paragraph, grouped by area. The groups are the edge and identity services, the core banking services, the admission control services, the fraud and analytics services, the deposits service, and DynaStore. Each paragraph states what the service is responsible for, where it runs and which data it owns. A summary table follows the paragraphs.}
+\label{sec:responsibilities}
 
-\begin{longtable}{@{}L{0.5cm}L{3.2cm}L{7.6cm}L{2.6cm}@{}}
+This subsection describes each service in turn, grouped by area. \Cref{tab:services} at the end of the subsection summarises the responsibilities, the runtime and the data of every service.
+
+\subsubsection{Edge and Identity}
+
+\paragraph{API Gateway.} The API Gateway is the only service that the internet can reach. It verifies the token of every request and asks the Identity service whether the session behind the token is still active. It then checks the role of the caller and, for account operations, whether the caller holds the account. For sensitive operations, it verifies the payment PIN or the app PIN with the Identity service before it forwards the request. The gateway removes any identity header that a client sends and sets the header itself, so internal services can trust it. It also serves both web applications and limits the size of request bodies.
+
+\paragraph{Identity and Authentication.} The Identity service manages everything that proves who a person is. It handles registration, sign-in, password changes and password resets. It issues short-lived access tokens and refresh tokens, and it rotates a refresh token every time the client uses it. It tracks the devices and sessions of each customer and locks a session after five minutes without activity. It stores the two PINs of each customer and locks a PIN after three wrong attempts. It issues and verifies the one-time passwords that confirm risky payments and new devices. It detects sign-ins from new devices and from implausibly distant places, and it reports both as signals to the risk engine. It also stores the KYC documents and supports their review by KYC officers.
+
+\subsubsection{Core Banking}
+
+\paragraph{Account.} The Account service maintains the customers and their accounts. It keeps one customer record for each person and any number of accounts of four products, which are savings, current, fixed deposit and recurring deposit. It records joint holders, account limits, freezes, nominees and saved payees. It applies the cooling period of new payees and delays any increase of a limit by 24 hours. It resolves pay identifiers to account numbers. It also keeps a hash-chained audit log of every change to an account, in which each entry contains a hash of the previous one. Any later change to the history therefore breaks the chain and becomes visible.
+
+\paragraph{Transaction Intake.} The Transaction Intake service accepts every customer payment and runs it through the admission pipeline. It enforces idempotency, so a request that the client repeats is treated as the same payment. It calls the Rate Limit Coordinator, the Account service and the Risk Detection service in turn. Depending on the result, it posts the payment to the Ledger or asks the customer for a one-time password. It can also reserve the funds for an analyst or decline the payment. \Cref{sec:payment-lifecycle} describes this pipeline in detail.
+
+\paragraph{Ledger.} The Ledger is the only service that moves money. It records every movement as a double-entry journal, in which the debits and credits of each journal sum to zero. It maintains the balances, places and releases holds on funds, and reverses journals when a payment is cancelled. It posts interest and runs a reconciliation that checks the sum of all balances against the journals. Database constraints reject an unbalanced journal, an overdrawn balance and any change to a posted entry.
+
+\subsubsection{Admission Control and Risk}
+
+\paragraph{Rate Limit Coordinator.} The Rate Limit Coordinator keeps the shared rate-limit state for all replicas of all services. It applies sliding-window limits to customers, accounts, devices and IP addresses for payments, and to identities and IP addresses for sign-in attempts. It stores the window counters in DynaStore as conflict-free counters, so every replica sees the same counts. It also hands out leases of permits, which let a busy caller admit several requests without a call per request. Operators change the policies through a configuration file in Git.
+
+\paragraph{Risk Detection.} The Risk Detection service scores each payment against 21 weighted rules. The rules use features in DynaStore, such as the recent velocity and the usual payment amount of a customer. Other features record when a device or payee first appeared. They also use signals from other services, such as a sign-in from a new device or an early closure of a fixed deposit. The sum of the weights of the matching rules gives a score from 0 to 100. The score decides whether the payment proceeds, needs a one-time password, waits for an analyst or is blocked. New rules can run in shadow mode, in which they are evaluated and recorded but do not affect the decision.
+
+\subsubsection{Fraud Response and Notification}
+
+\paragraph{Fraud Alert.} The Fraud Alert service turns suspicious activity into work for the fraud team. It consumes transaction events, sign-in events and the signals of the stream processing job. It raises alerts, freezes accounts automatically when the evidence is strong, and groups related alerts into cases. Analysts work the cases through the staff console, and a second analyst must approve the unfreezing of an account. The service also writes short-lived signals and a deny list into DynaStore, which the risk engine reads on the next payment.
+
+\paragraph{Notification.} The Notification Service delivers messages to customers. It runs as a Cloud Function that Pub/Sub triggers for each notification request. It always writes the message to the in-app inbox in Firestore. Depending on the type of message, it also sends an email through Gmail or Brevo and an RCS message through a simulated channel. Administrators can switch each channel and the email provider on or off at run time.
+
+\subsubsection{Analytics}
+
+\paragraph{Audit Analytics.} The Audit Analytics service is a Flink SQL job on Dataproc. It reads the stream of transaction events from Kafka and computes statistics over one-minute windows. These statistics include throughput, completed and declined payments, rate-limit decisions, risk decisions and the number of unique customers. It writes the statistics to a results topic. It also detects four fraud patterns over longer windows and writes them to a signals topic. \Cref{sec:streaming} describes the job.
+
+\subsubsection{Deposits}
+
+\paragraph{Deposits and End of Day.} The Deposits service manages fixed deposits and recurring deposits. It publishes the rate cards, quotes the maturity amount of a proposed deposit, and prices the early closure of an existing one. It also runs the end-of-day batch once a day. The batch accrues interest on savings accounts and deposits, collects recurring instalments, and pays out deposits that reach maturity. It records each business date once, so a repeated run has no further effect. The service also produces monthly statements and registers a fingerprint of each one, which lets anyone verify a statement file later.
+
+\subsubsection{Leaderless Storage}
+
+\paragraph{DynaStore.} DynaStore is the leaderless key-value store that implements the concept of the scenario. It runs as a StatefulSet of three replicas, each with its own persistent disk. Any replica can coordinate any request, and every key is stored on three replicas. The Rate Limit Coordinator, the Risk Detection service and the services that raise fraud signals use it through gRPC. \Cref{sec:concept} describes its design.
+
+\begin{longtable}{@{}L{0.5cm}L{3.0cm}L{7.4cm}L{3.0cm}@{}}
 \caption{Responsibilities, runtime and data ownership of each service.}\label{tab:services}\\
 \toprule
-No. & Service & Responsibility & Runs on and data \\
+No. & Service & Responsibility & Runtime and data \\
 \midrule\endhead
-1 & API Gateway & & \\
-2 & Identity and Auth & & \\
-3 & Account & & \\
-4 & Transaction Intake & & \\
-5 & Rate Limit Coordinator & & \\
-6 & Ledger & & \\
-7 & Risk Detection & & \\
-8 & Fraud Alert & & \\
-9 & Notification Service & & \\
-10 & Audit Analytics & & \\
-11 & Deposits and End of Day & & \\
-12 & DynaStore & & \\
+1 & API Gateway & Single public entry point, token and session checks, role and ownership checks, PIN checks, web applications & GKE with autoscaling, no data \\
+2 & Identity and Authentication & Registration, sign-in, tokens, sessions, devices, PINs, one-time passwords, KYC documents & GKE with autoscaling, Cloud SQL, Firestore, Cloud Storage \\
+3 & Account & Customers, accounts, joint holders, limits, freezes, payees, pay identifiers, audit chain & GKE with autoscaling, Cloud SQL \\
+4 & Transaction Intake & Admission pipeline, idempotency, challenges and holds & GKE with autoscaling, Cloud SQL \\
+5 & Rate Limit Coordinator & Shared sliding-window limits and permit leases & GKE, DynaStore \\
+6 & Ledger & Double-entry journals, balances, holds, reversals, interest, reconciliation & GKE with autoscaling, Cloud SQL \\
+7 & Risk Detection & Scoring against 21 weighted rules, shadow rules & GKE with autoscaling, DynaStore \\
+8 & Fraud Alert & Alerts, automatic freezes, cases, maker-checker review, deny list & GKE, Cloud SQL, Firestore \\
+9 & Notification & In-app inbox, email and RCS delivery & Cloud Function, Firestore \\
+10 & Audit Analytics & Windowed statistics and fraud pattern detection & Flink on Dataproc, Kafka, Cloud Storage \\
+11 & Deposits and End of Day & Fixed and recurring deposits, end-of-day batch, statements & GKE, Cloud SQL, Cloud Storage \\
+12 & DynaStore & Leaderless replicated key-value storage & GKE StatefulSet, persistent disks \\
 \bottomrule
 \end{longtable}
 
 \subsection{Lifecycle of a Payment}
-\plan{This subsection follows one payment from the customer's request to the ledger entry and the notification. A sequence diagram shows the order of the calls and the six checks. The text explains the possible outcomes, which are completion, an OTP challenge, a hold for analyst review, and a decline.}
+\label{sec:payment-lifecycle}
 
-\mermaidplaceholder{payment-sequence}{Sequence of calls for a single payment.}{The client, gateway, Intake, Rate Limit, Account, Risk, Ledger, Kafka and the Notification function, with the PIN check, the idempotency check, the risk decision and the double-entry posting.}{9cm}
+A payment shows how the services cooperate. \Cref{fig:payment-sequence} shows the sequence of calls, and this subsection explains each step.
+
+The customer enters the payee, the amount and an optional note, and confirms the payment with the payment PIN. The web application generates an idempotency key for the attempt and sends the request to the API Gateway. The gateway checks the session and the PIN with the Identity service and forwards the request to the Transaction Intake service.
+
+The Transaction Intake service first claims the idempotency key. If a payment with the same key already exists, the service returns the result of that payment and moves no further money. The service then asks the Rate Limit Coordinator over gRPC whether the customer, the account, the device and the IP address are within their limits. Next, it asks the Account service whether the customer holds an active account. It resolves the payee and applies the limit per payment and the limit for new payees.
+
+The Transaction Intake service then sends the payment and its context to the Risk Detection service over gRPC. The risk engine returns a score, a decision and the reasons behind the decision. The decision leads to one of four paths.
+\begin{itemize}
+\item An allowed payment continues at once.
+\item A challenged payment waits while the Identity service sends a one-time password to the customer. The payment continues when the customer enters the correct code, and it fails after a wrong code or a timeout.
+\item A held payment reserves the funds through a hold in the Ledger. A fraud analyst then approves or rejects it, and the customer can also cancel it.
+\item A blocked payment is declined, and no money moves.
+\end{itemize}
+
+For a payment that continues, the Transaction Intake service checks and reserves the daily limit under a lock. It then asks the Ledger over gRPC to post a double-entry journal. The Ledger uses its own idempotency key, so a retried request cannot post the same payment twice. Finally, the Transaction Intake service records the outcome and an outbox event in one database transaction. A relay publishes the event to Kafka, where the Fraud Alert service and the Flink job consume it. The Fraud Alert service then sends a receipt request through Pub/Sub to the Notification Service, which informs the customer.
+
+The web application shows the outcome together with the six visible checks. These are the duplicate check, the rate limits, the account and payee check, the limits, the risk engine and the ledger posting. When a check stops the payment, the application shows which check stopped it and why. If a dependency fails during the pipeline, the payment stays in a processing state. The client can then retry with the same idempotency key, and the retry continues from where the first attempt stopped.
+
+\mermaidplaceholder{payment-sequence}{Sequence of calls for a single payment.}{The client, gateway, Identity, Intake, Rate Limit, Account, Risk, Ledger, Kafka and the Notification function, with the PIN check, the idempotency check, the risk decision and its four outcomes, the double-entry posting, the outbox event to Kafka, and the receipt that Fraud Alert sends through Pub/Sub to the Notification function.}{9cm}
 
 \subsection{Client Applications}
-\plan{This subsection describes the two web applications that the gateway serves. The customer application is built with React and the original application keeps the staff console. The subsection explains why serving them from the gateway avoids a second public endpoint and any cross-origin configuration.}
+\label{sec:clients}
 
+The API Gateway serves two web applications from the same origin. The customer application at the root path is a single-page application written in React and TypeScript. Vite compiles it into static files, which the repository stores in the static directory of the gateway. Its design targets phones first. It includes a swipe control for confirming payments, entry fields for PINs and one-time passwords, and an animated view of the checks of each payment. The original application, written in plain JavaScript, remains available under the path \code{/classic/}. It hosts the staff console and a few customer functions, such as statements and the camera QR scanner.
+
+Serving both applications from the gateway has three advantages. The system needs only one public address. The browser makes every request to the same origin, so no cross-origin configuration is needed. The gateway can also apply a strict Content-Security-Policy, which allows scripts only from its own origin and forbids framing by other sites. Both applications keep the session in the storage of the browser tab, so closing the tab signs the user out.
 
 % =====================================================================  5
 \section{Interconnection Mechanisms}
 \label{sec:interconnection}
 
+This section describes how the services of \project{} communicate. It explains the four mechanisms that the system uses and the rule that assigns each interaction to a mechanism. It also describes the patterns that keep the communication reliable and secure.
+
 \subsection{Overview}
-\plan{This subsection introduces the four mechanisms and states the rule that decides which one each interaction uses. Request and response at human speed use REST, calls on the hot path of every payment use gRPC, durable event streams use Kafka, and the trigger of the serverless function uses Pub/Sub.}
+\label{sec:comm-overview}
+
+The services communicate through four mechanisms, which are REST, gRPC, Kafka and Pub/Sub. \Cref{fig:communication} shows which mechanism connects each pair of services. One rule decides the choice. Requests that a person makes and waits for use REST. Calls on the hot path of every payment use gRPC. Events that several consumers must receive in order, and possibly replay later, use Kafka. The trigger of the serverless function uses Pub/Sub. \Cref{tab:mechanisms} summarises the mechanisms and their uses.
+
+\begin{table}[H]\centering\small
+\caption{Communication mechanisms and their uses.}\label{tab:mechanisms}
+\begin{tabularx}{\linewidth}{@{}L{2.0cm}L{2.6cm}YY@{}}
+\toprule
+Mechanism & Style & Used for & Reason for the choice \\
+\midrule
+REST & Synchronous request and response & Client to gateway, gateway to services, service calls off the payment path & Simple, widely supported and easy to inspect \\
+gRPC & Synchronous remote procedure call & Intake to Rate Limit, Risk and Ledger, and every DynaStore call & Binary encoding, typed contracts, deadlines and status codes for frequent calls \\
+Kafka & Asynchronous event stream & Transaction, sign-in, ledger and account events, fraud signals and analytics results & Durable, ordered per key and replayable, and the source and sink of the Flink job \\
+Pub/Sub & Asynchronous message queue & Notification requests to the Cloud Function & Native trigger for Cloud Functions with automatic retries \\
+\bottomrule
+\end{tabularx}
+\end{table}
 
 \mermaidplaceholder{communication}{Communication mechanisms used between services.}{The same services as the decomposition figure, with REST, gRPC, Kafka and Pub/Sub links drawn in four different line styles and a legend.}{7cm}
 
 \subsection{REST}
-\plan{This subsection describes the REST interfaces between the client and the gateway and between services. It explains the trust boundary, in which the gateway verifies the token and sets the actor header itself.}
+\label{sec:rest}
+
+REST carries the requests of the web application and most calls between services. A REST interface exposes resources at URLs and uses the standard HTTP methods to read and change them. All REST messages in \project{} use JSON. Each service publishes an OpenAPI description of its interface, which FastAPI generates from the code.
+
+The client sends every request to the API Gateway with a bearer token. The gateway verifies the token and the session, applies the checks of \cref{sec:responsibilities}, and forwards the request to the internal service. It sets an \code{X-Actor} header that names the authenticated caller and discards any such header that the client sent. Internal services read the identity of the caller only from this header. They never accept requests from outside the namespace, because the network policy of \cref{sec:network} blocks them.
+
+Services also call one another over REST when the call is not on the payment path. For example, the Fraud Alert service freezes accounts through the Account service, and the Deposits service asks the Ledger to post interest. The Transaction Intake service also asks the Account service to authorise each payer. Every service-to-service call carries a timeout, so a slow dependency cannot hold a request open indefinitely.
 
 \subsection{gRPC}
-\plan{This subsection describes the gRPC contracts in the proto directory and the calls that use them. It explains the benefits for frequent calls, which are binary framing, typed contracts, deadlines and status codes. It also explains how clients balance load across autoscaled pods.}
+\label{sec:grpc}
+
+gRPC carries the calls that occur on every payment. gRPC is a remote procedure call framework that sends Protocol Buffers messages over HTTP/2. Protocol Buffers is a compact binary format with a schema that defines every message and its fields. The repository keeps these schemas in the \code{proto} directory, and both the clients and the servers generate their code from them. A change that breaks a contract therefore fails at build time.
+
+Four services offer gRPC interfaces. The Rate Limit Coordinator offers a \code{Check} call, and the Risk Detection service offers an \code{Evaluate} call. The Ledger offers calls to post journals, read balances, and create and release holds. DynaStore offers calls to read, write and increment values, together with the internal calls that replicas use among themselves.
+
+gRPC suits these calls for three reasons. Binary messages are smaller and faster to encode than JSON. Every call carries a deadline, after which the client stops waiting. Every response carries a defined status code, which lets the caller tell a rejected request from an unavailable server.
+
+gRPC keeps one long-lived HTTP/2 connection between a client and a server. A standard Kubernetes service would send all calls on that connection to a single pod, and pods added by the autoscaler would receive no traffic. The gRPC clients in \project{} therefore resolve a headless service, for which DNS returns the address of every pod. They then spread their calls across all pods in turn.
 
 \subsection{Event Streaming with Kafka}
-\plan{This subsection describes the Kafka cluster that runs in GKE under the Strimzi operator and lists the topics with their producers and consumers in a table. It explains why the event stream decouples the payment path from analytics and fraud response.}
+\label{sec:kafka}
+
+Kafka carries the events that the system produces. Kafka is a distributed log, in which producers append events to topics and consumers read them in order at their own pace. Kafka keeps events after delivery, so a new consumer can read the history and a failed consumer can resume where it stopped.
+
+The Kafka cluster runs inside GKE under the Strimzi operator, which manages Kafka through Kubernetes resources. The cluster runs in KRaft mode, in which Kafka manages its own metadata without a separate ZooKeeper ensemble. \Cref{tab:topics} lists the topics with their producers and consumers. Each topic has three partitions, and events with the same key, such as the same account, always go to the same partition. Each consumer therefore sees the events of one account in the order in which they happened.
+
+\begin{table}[H]\centering\small
+\caption{Kafka topics, their producers and their consumers.}\label{tab:topics}
+\begin{tabularx}{\linewidth}{@{}L{3.6cm}L{3.2cm}Y@{}}
+\toprule
+Topic & Producer & Consumers \\
+\midrule
+\code{txn-events} & Transaction Intake & Audit Analytics (Flink), Fraud Alert \\
+\code{auth-events} & Identity & Fraud Alert \\
+\code{risk-signals} & Audit Analytics (Flink) & Fraud Alert \\
+\code{analytics-results} & Audit Analytics (Flink) & Fraud Alert, which stores the statistics for the staff console \\
+\code{ledger.journal-posted} & Ledger & Available to downstream consumers \\
+\code{ledger.hold-changed} & Ledger & Available to downstream consumers \\
+\code{account.events} & Account & Available to downstream consumers \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The event stream decouples the payment path from analytics and fraud response. The Transaction Intake service publishes an event and returns its answer to the customer at once. It does not wait for the Flink job or the Fraud Alert service, and a slow or failed consumer cannot delay a payment. The same stream also lets the Flink job run on a separate managed cluster, because the job only needs network access to the brokers.
 
 \subsection{Transactional Outbox}
-\plan{This subsection explains the transactional outbox pattern. A service writes an event into an outbox table in the same database transaction as the business change, and a relay publishes it afterwards. An event therefore exists exactly when the change has committed. Delivery is at least once, and every consumer is idempotent.}
+\label{sec:outbox}
+
+A service that changes its database and then publishes an event faces a dual-write problem. If the service crashes between the two steps, the database and the event stream disagree. A payment might complete without any event, or an event might announce a payment that never committed.
+
+\project{} solves this problem with the transactional outbox pattern~\cite{outbox}, which \cref{fig:outbox} shows. A service never writes to Kafka directly. It inserts the event into an outbox table in the same database transaction as the business change. A relay runs as a sidecar container next to the service. It reads new rows from the outbox table and publishes them to Kafka, and it marks each row once Kafka acknowledges it. An event therefore exists exactly when the business change has committed.
+
+The relay may publish an event twice if it crashes after Kafka acknowledges the event and before it marks the row. Delivery is therefore at least once. Every consumer tolerates duplicates by recording the identifiers of the events it has processed and skipping any event it has already seen. Several replicas of a service can run their relays at the same time. Each relay locks the rows it publishes and skips the rows that another relay holds.
 
 \mermaidplaceholder{outbox}{Transactional outbox between a service database and Kafka.}{A service writes the business row and the outbox row in one transaction. The relay sidecar reads the outbox and publishes to Kafka, and consumers deduplicate by event identifier.}{4.5cm}
 
 \subsection{Serverless Notification with Pub/Sub}
-\plan{This subsection describes the Notification Service as a Cloud Function triggered by Pub/Sub. It explains the asynchronous and event-driven behaviour, the retry policy, the per-message channel selection for the inbox, email and RCS, and the switch between email providers.}
+\label{sec:pubsub}
 
+The Notification Service runs as a Cloud Function of the second generation. Cloud Functions runs code in response to events and charges only while the code runs. Pub/Sub, the managed message queue of Google Cloud, triggers the function through Eventarc for each message on the \code{notifications} topic.
+
+Two services publish notification requests. The Identity service sends one-time passwords, security alerts and KYC decisions. The Fraud Alert service consumes the transaction events and sends payment receipts, declined-payment notices, fraud warnings and freeze notices. Each request names the customer, the type of message and the text. It may also name the channels to use. A one-time password, for example, goes to the inbox, by email and by RCS, while a receipt goes only to the inbox.
+
+The function scales from zero to three instances and processes each message asynchronously. The publisher never waits for delivery. If the function fails, Pub/Sub retries the message until delivery succeeds. The function therefore treats every message as possibly repeated. It writes each inbox entry under the identifier of the message, so a retry overwrites the same entry. The function also reads its settings from Firestore. These settings let an administrator switch email or RCS off, or move email from Gmail to Brevo, without a new deployment.
 
 % =====================================================================  6
 \section{Transaction Admission and Fraud Detection}
 \label{sec:fraud}
 
+Transaction admission and fraud monitoring form the core of the scenario. This section first sets out the threats that \project{} defends against. It then describes each layer of defence, from the rate limiter that acts before any other work to the case management that acts minutes later. It closes with an evaluation in which a simulator attacks the running system.
+
 \subsection{Threat Model}
-\plan{This subsection describes the attacks that the system defends against. They are a stolen password, a full account takeover in which the attacker also holds the SIM and the PIN, automated payment bots, card-testing probes with tiny amounts, structuring of large sums just below the reporting threshold, mule rings that collect money from many victims, and misuse by bank staff.}
+\label{sec:threats}
+
+The design considers the attacks that retail banks commonly face. \Cref{tab:threats} lists them with the property that makes each one hard to detect.
+
+\begin{table}[htbp]\centering\small
+\caption{Threats considered in the design.}\label{tab:threats}
+\begin{tabularx}{\linewidth}{@{}L{3.4cm}Y@{}}
+\toprule
+Threat & Description \\
+\midrule
+Stolen password & An attacker obtains the password of a customer, for example through phishing, and signs in from a device of their own. \\
+Account takeover & An attacker holds the password, the SIM card and the PIN of a customer. The attacker can then receive one-time passwords and pass every credential check. \\
+Payment bots & A script submits payments at machine speed, for example to empty an account before the customer notices. \\
+Card testing & An attacker sends tiny payments to learn whether an account works, and then sends a large payment. \\
+Structuring & A customer splits a large sum into payments that stay just below the threshold of Rs 50,000, which would otherwise attract scrutiny. \\
+Mule rings & Many victims are tricked into paying one collection account. Each payment looks ordinary on its own. \\
+Account changes before theft & An attacker changes the email address or phone number of a customer, or resets a credential, before moving money. \\
+Staff misuse & A single member of staff tries to release a frozen account or approve a payment without oversight. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+These threats differ in what they reveal. A bot reveals itself through volume, and a takeover through an unfamiliar device and place. Card testing and structuring reveal themselves only through a short sequence of payments from one account. A mule ring reveals itself only when the payments of many customers are viewed together. No single check can see all of these signs, which motivates the layered design that follows.
 
 \subsection{Defence in Depth}
-\plan{This subsection explains the five layers and the principle of defence in depth, under which several independent checks stop an attack that any single check would miss. A diagram shows the path of a payment through the layers and the possible decisions.}
+\label{sec:depth}
+
+Defence in depth places several independent controls in the path of an attack, so that an attack that passes one control meets the next. \project{} applies five layers to every payment. \Cref{fig:fraud-layers} shows the path of a payment through them.
+
+The layers differ in speed and in breadth of view. Admission control is the cheapest layer and sees only counts. The authorisation layer sees the account and its limits. The risk engine sees the recent history of the customer, the device and the payee, and it decides within tens of milliseconds. Stream analytics sees all payments over windows of up to an hour, but it reports after the window closes. Case management brings in human judgement. The slow layers feed their findings back into the fast layers through signals in DynaStore. The system therefore improves its real-time decisions with knowledge that only the slow layers can gather.
 
 \mermaidplaceholder{fraud-layers}{Path of a payment through the five layers of defence and the decisions each layer can take.}{A payment enters admission control, then authorisation and policy, then risk scoring with its four score bands. Accepted payments reach the ledger and the event stream, where stream analytics and the fraud service act after the fact and feed signals back.}{7cm}
 
 \subsection{Admission Control}
-\plan{This subsection describes the distributed rate limiter. It covers the sliding-window policies for customers, accounts, devices, IP addresses and logins, the permit leases that reduce calls to the store, the conflict-free counters in DynaStore, and the degraded mode in which small payments proceed and large payments stop when the limiter is unreachable.}
+\label{sec:admission}
+
+The Rate Limit Coordinator decides whether a request may proceed at all. It applies limits to several scopes at once, and a request must pass every scope. \Cref{tab:ratelimits} lists the policies. Each policy allows at most a given number of permits within a sliding window.
+
+\begin{table}[H]\centering\small
+\caption{Rate-limit policies for payments and sign-in attempts.}\label{tab:ratelimits}
+\begin{tabularx}{\linewidth}{@{}L{2.4cm}L{2.6cm}Y@{}}
+\toprule
+Action & Scope & Limit \\
+\midrule
+Payment & Customer & 10 per minute and 100 per hour \\
+Payment & Account & 10 per minute \\
+Payment & Device & 20 per minute \\
+Payment & IP address & 120 per minute, with leases of 10 permits \\
+Sign-in & Email or phone & 5 per 5 minutes \\
+Sign-in & IP address & 30 per minute \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The scopes complement one another. The customer and account limits stop a bot that uses one stolen login. The device limit stops a single machine that cycles through many accounts. The IP limit stops a burst from one network. The sign-in limit on each email address or phone number slows the guessing of one customer's password. The sign-in limit on each IP address slows guessing across many customers.
+
+The coordinator keeps the window counters in DynaStore. Every replica of every service therefore sees the same counts, and an attacker gains nothing by spreading requests across replicas. The counters are conflict-free replicated counters, which \cref{sec:concept} describes. Two replicas can increment the same counter at the same moment without losing either increment. For the busiest scope, the IP address, a coordinator replica takes a lease of ten permits at a time and hands them out locally. Leases trade a small loss of precision for far fewer calls to the store.
+
+The coordinator must also decide what happens when DynaStore is unreachable. Refusing every payment would turn a storage fault into an outage of the bank. Admitting every payment would remove the protection exactly when an attacker might exploit a fault. The coordinator therefore admits payments of up to Rs 2,000 and refuses larger ones. Small payments fail open, and large payments fail closed.
 
 \subsection{Identity-Based Controls}
-\plan{This subsection describes the controls that bind a payment to a verified person and device. It covers the new-device code, the payment PIN and the app PIN with lockout, the idle session lock, the delay before a raised limit takes effect, the cooling period for new payees, and the signals raised when contact details change or a refresh token is replayed.}
+\label{sec:identity-controls}
+
+The second group of controls binds every payment to a verified person on a known device. These controls act before the risk engine and also feed it.
+
+\paragraph{Device binding.} The application identifies each browser by a random device identifier. When a customer signs in on a device that the bank has not seen before, the correct password is not enough. The Identity service sends a six-digit code to the email address and to the inbox of the customer on their other devices. The session starts only after the customer enters this code. A stolen password alone therefore opens nothing.
+
+\paragraph{Two PINs.} Each customer holds a six-digit payment PIN and a four-digit app PIN. The payment PIN approves payments, new payees, higher limits and joint holders. The app PIN unlocks the application and approves deposits and nominees. The API Gateway verifies the required PIN with the Identity service before the request reaches the service that does the work. Three wrong attempts lock a PIN for 24 hours, and the customer receives an alert. The Identity service stores each PIN as an HMAC-SHA256 digest with a salt and a secret pepper. A copy of the database therefore does not reveal the PINs.
+
+\paragraph{Sessions.} Access tokens live for 15 minutes, but the gateway also checks the session behind every token with the Identity service. Signing out, removing a device or blocking all access therefore takes effect at once. A customer session locks after five minutes without activity and unlocks with the app PIN. A staff session ends after 15 minutes without activity. Each refresh token works only once. If an old refresh token appears again, someone has copied it, so the Identity service ends the session and raises a signal.
+
+\paragraph{Delays on risky changes.} Lowering a payment limit takes effect at once, but raising one takes effect only after 24 hours. A new payee can receive at most Rs 10,000 per payment during the first 24 hours. These delays give the customer time to notice a change that someone else made.
+
+\paragraph{Signals from account changes.} The Identity service writes short-lived signals into DynaStore after certain account events. These events are a change of email address or phone number, a reset of a password or PIN, a locked PIN and a replayed refresh token. It also writes signals at sign-in for a new device and for impossible travel. Impossible travel means that the distance between two consecutive sign-ins, divided by the time between them, exceeds 900 kilometres per hour. The risk engine weighs all of these signals in its next decision.
 
 \subsection{Real-Time Risk Scoring}
-\plan{This subsection describes the risk engine. It explains how DynaStore holds the risk features, lists the 21 rules with their weights in a table, and explains the four score bands. It argues why a weak signal alone can never block a payment, and describes the one-time password challenge, the analyst hold, shadow mode for new rules, and the reasons that the customer sees.}
+\label{sec:risk}
 
-\begin{longtable}{@{}L{4.2cm}L{1.2cm}L{8.4cm}@{}}
+The Risk Detection service scores every payment that passes admission and authorisation. It evaluates the 21 rules of \cref{tab:rules}. Every rule that matches adds its weight to the score, and the total is capped at 100.
+
+\begin{longtable}{@{}L{4.4cm}L{1.1cm}L{8.6cm}@{}}
 \caption{Rules of the real-time risk engine and their weights.}\label{tab:rules}\\
 \toprule
 Rule & Weight & Condition \\
 \midrule\endhead
+\code{DENY\_LIST} & 100 & The payee or the device received confirmed fraud in the last 30 days. \\
+\code{VELOCITY\_1M} & 35 & More than 5 payment attempts from the customer in one minute. \\
+\code{VELOCITY\_1H} & 20 & More than 20 payment attempts from the customer in one hour. \\
+\code{AMOUNT\_ANOMALY} & 30 & At least Rs 5,000 and more than five times the usual amount, given at least five earlier payments. \\
+\code{HIGH\_AMOUNT} & 10 & At least Rs 40,000. \\
+\code{NEW\_DEVICE} & 20 & The device first appeared less than 24 hours ago. \\
+\code{NEW\_PAYEE} & 10 & At least Rs 5,000 to a payee first paid less than 24 hours ago. \\
+\code{ATO\_PATTERN} & 40 & A new device, a new payee and at least Rs 10,000 together. \\
+\code{MICRO\_PROBING} & 60 & At least Rs 5,000 after three or more recent payments of at most Rs 10. \\
+\code{DORMANT\_ACCOUNT} & 55 & At least Rs 5,000 from an account idle for 90 days. \\
+\code{ODD\_HOURS} & 10 & Between 1 and 5 in the morning, India time. \\
+\code{STRUCTURING} & 60 & The third recent payment within 5 percent below Rs 50,000. \\
+\code{SESSION\_NEW\_DEVICE\_LOGIN} & 10 & The session began with a new-device sign-in. \\
+\code{IMPOSSIBLE\_TRAVEL} & 40 & The session began with an impossible-travel sign-in. \\
+\code{FD\_BREAK\_AND\_FLEE} & 35 & A fixed deposit was closed early, and the money goes to an untrusted payee. \\
+\code{PATTERN\_SIGNAL\_SENDER} & 30 & Stream analytics flagged the paying account. \\
+\code{MULE\_PAYEE} & 60 & Stream analytics flagged the receiving account as a mule. \\
+\code{CONTACT\_CHANGED} & 20 & The email address or phone number changed in the last three days. \\
+\code{CREDENTIAL\_RESET} & 20 & A password or PIN was reset or changed in the last day. \\
+\code{PIN\_LOCKED} & 15 & A PIN locked after three wrong attempts in the last day. \\
+\code{TOKEN\_REUSE} & 40 & A replayed refresh token was detected in the last day. \\
 \bottomrule
 \end{longtable}
 
+The rules draw on three kinds of input. Velocity counters and behavioural features, such as the usual amount and the first appearance of a device or payee, live in DynaStore. The Risk Detection service updates them with every payment. Signals from other services also live in DynaStore and expire on their own. The remaining inputs, such as the amount and the time of day, come with the request itself.
+
+The score falls into one of four bands, which decide the outcome. A score below 30 allows the payment. A score from 30 to 59 challenges it, so the customer must confirm the payment with a one-time password. A score from 60 to 94 holds it. The Ledger then reserves the funds, and a fraud analyst approves or rejects the payment. A score of 95 or more blocks it.
+
+The band boundaries follow from the weights. Only the deny list, or several strong signals together, can reach the blocking band. A weak signal, such as the time of day, can raise a payment to a challenge or a hold but never to a block. Holding a doubtful payment protects the customer without the cost of refusing a genuine payment outright. Signals about account changes count only when the payee is untrusted. A customer who changes a phone number can therefore still pay their landlord without friction.
+
+The risk engine also handles its own failures. If DynaStore is unreachable, the velocity and history rules cannot run. The engine then holds every payment of Rs 20,000 or more for review. The rules live in a configuration file in Git, and the service reloads them without a restart. A new rule can run in shadow mode first, in which the engine evaluates and records it without adding its weight. The team can then measure how often a rule would fire before it affects customers. Every decision returns the names of the matching rules, and the application shows them to the customer in plain language.
+
 \subsection{Stream Pattern Detection}
-\plan{This subsection describes the four patterns that the Flink job detects, namely bursts, micro-payment probing, structuring and mule fan-in, with their windows and thresholds. It explains why no single payment reveals these patterns, and how the fraud service writes signals back into DynaStore so that the risk engine scores the next payment from a flagged account higher.}
+\label{sec:patterns}
 
-\subsection{Response and Case Management}
-\plan{This subsection describes the fraud service. It covers alerts, automatic freezes, the deny list, cases, and the maker-checker rule for unfreezing an account. It also describes the controls that customers hold, which are cancelling a held payment, reporting a payment and blocking all access in one action.}
-
-\subsection{Evaluation with a Fraud Simulator}
-\plan{This subsection reports the results of the fraud simulator, which runs eight scenarios against the live system. A table lists each attack, the layer that caught it and the outcome. The subsection closes with the limits of the evaluation, which are that the rule weights are set by hand and tested on synthetic data.}
+Some fraud is invisible in any single payment. The Audit Analytics job on Flink therefore examines the stream of transaction events over time windows. A tumbling window divides time into fixed, non-overlapping intervals. A hopping window has a fixed length but starts at regular steps that are shorter than its length, so consecutive windows overlap. \Cref{tab:patterns} lists the signals that the job emits.
 
 \begin{table}[H]\centering\small
-\caption{Outcome of the eight fraud simulator scenarios.}\label{tab:simulator}
-\begin{tabularx}{\linewidth}{@{}lYl@{}}
+\caption{Fraud signals detected by stream analytics.}\label{tab:patterns}
+\begin{tabularx}{\linewidth}{@{}L{3.2cm}L{3.6cm}Y@{}}
 \toprule
-Scenario & Layer that responded & Outcome \\
+Signal & Window & Condition \\
 \midrule
-Ordinary customer & None & Not disturbed \\
-Payment bot & & \\
-Stolen password & & \\
-Account takeover & & \\
-Micro-payment probing & & \\
-Structuring & & \\
-Fixed deposit break and transfer & & \\
-Mule ring & & \\
+\code{VELOCITY\_BURST} & 1 minute, tumbling & At least 8 payment attempts from one account \\
+\code{DECLINE\_BURST} & 1 minute, tumbling & At least 5 declined attempts from one account \\
+\code{MICRO\_PROBING} & 5 minutes, hopping every minute & At least 3 completed payments of at most Rs 10 from one account \\
+\code{STRUCTURING} & 60 minutes, hopping every 5 minutes & At least 3 payments from one account between Rs 47,500 and Rs 49,999.99 \\
+\code{MULE\_FAN\_IN} & 10 minutes, hopping every minute & At least 5 distinct senders paying at least Rs 5,000 each into one account \\
 \bottomrule
 \end{tabularx}
 \end{table}
+
+The bursts and the probing signal confirm, over a wider window, what the real-time rules suspect within seconds. The structuring signal catches a customer who spaces payments out to avoid the real-time rule. The mule fan-in signal is the clearest case for stream analytics. Each payment into the mule account comes from a different customer, who has an ordinary history and pays an ordinary amount. The risk engine of each payer therefore sees nothing unusual. Only a view across customers, grouped by the receiving account, reveals the pattern. The minimum amount of Rs 5,000 keeps ordinary shops, which receive many small payments, out of this signal.
+
+The job writes each signal to the \code{risk-signals} topic. The Fraud Alert service consumes the signal and writes a short-lived marker into DynaStore. The next payment to a flagged mule account matches the \code{MULE\_PAYEE} rule, and the next payment from a flagged sender matches the \code{PATTERN\_SIGNAL\_SENDER} rule. In this way, stream analytics changes the real-time decision on the very next payment.
+
+\subsection{Response and Case Management}
+\label{sec:response}
+
+The Fraud Alert service turns events and signals into protective action and into work for the fraud team. Its behaviour depends on the event.
+
+A held payment opens a case for an analyst, with high severity when the risk score is 75 or more. The customer receives a message that asks whether they made the payment. A blocked payment raises a high-severity alert and informs the customer. A customer who answers that they did not make a held payment triggers the strongest response. The payment is cancelled, the account is frozen, and an account takeover case opens.
+
+A stream signal raises an alert. Because hopping windows report the same pattern repeatedly, the service keeps one signal of each type for each account within ten minutes. It treats a signal as serious when the signal is a mule fan-in or when two different signals concern the same account within ten minutes. A serious signal freezes the account automatically, opens a high-severity case and informs the account holder.
+
+When an analyst confirms fraud, the service cancels the held payment and freezes the account. It also adds the payee and the device to a deny list in DynaStore for 30 days. Any later payment to that payee or from that device then matches the \code{DENY\_LIST} rule and is blocked. Unfreezing an account follows the maker-checker rule. One analyst requests the release, and a different analyst must approve it.
+
+Customers hold three controls of their own. They can cancel a payment that the bank has held. They can report a completed payment, which opens a case. They can also block everything in one action. This action freezes every account of the customer, signs out every device and opens a case for a fraud officer. Incoming payments still arrive while the accounts are frozen.
+
+\subsection{Evaluation with a Fraud Simulator}
+\label{sec:fraud-eval}
+
+A fraud simulator in the repository tests the layers against the deployed system. It creates fresh customers and runs eight scenarios through the public API. The first scenario is an ordinary customer, and the other seven are attacks. \Cref{tab:simulator} lists the outcome of each scenario in the final run against the cloud deployment.
+
+\begin{table}[H]\centering\small
+\caption{Outcome of the eight fraud simulator scenarios against the cloud deployment.}\label{tab:simulator}
+\begin{tabularx}{\linewidth}{@{}L{3.1cm}L{3.6cm}Y@{}}
+\toprule
+Scenario & Layer that responded & Outcome \\
+\midrule
+Ordinary customer & None & Three small payments completed without friction \\
+Payment bot & Rate Limit Coordinator and velocity rule & Of 30 rapid payments, 5 completed, 5 needed a one-time password and 20 were rate-limited \\
+Stolen password & Identity, device binding & The sign-in from a new device stopped at the code sent to the customer \\
+Account takeover & Risk Detection & Score 100 from a new device, impossible travel, a new payee and the takeover pattern, so the payment was blocked \\
+Micro-payment probing & Risk Detection & Three payments of Rs 2 completed, and the following Rs 9,500 payment was held with score 70 \\
+Structuring & Risk Detection & The first two payments just below Rs 50,000 completed, and the third and fourth were held with score 70 \\
+Fixed deposit break and transfer & Risk Detection with a signal from Deposits & The transfer to a new payee needed a one-time password, with score 45 \\
+Mule ring & Audit Analytics and Fraud Alert & Six senders within ten minutes raised a mule fan-in signal, which froze the account and opened a case \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The results show that each attack meets the layer designed for it. The ordinary customer passed every check without a challenge, which shows that the layers do not burden normal use. The mule ring passed every real-time check, as expected, and only stream analytics caught it. This outcome confirms the value of the slow layer and of its feedback into the fast layers.
+
+The evaluation has two limits. First, the team chose the rule weights and thresholds by reasoning about each threat, and it tested them only on synthetic traffic. A bank would tune them against labelled historical data and track the rates of false alarms and missed fraud. Second, the simulator tests one instance of each attack. It shows that the layers work as designed, but it does not measure how well they generalise to attacks that differ from these scenarios.
 
 % =====================================================================  7
 \section{Data Architecture}

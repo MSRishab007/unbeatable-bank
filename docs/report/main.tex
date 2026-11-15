@@ -255,38 +255,101 @@ Observability & Prometheus and Grafana for metrics, and Cloud Logging for the lo
 \section{Cloud Deployment Architecture}
 \label{sec:deployment}
 
+This section describes how \project{} is deployed on Google Cloud. It covers the compute platform, the network and the public edge, the managed services, the infrastructure code, the delivery pipeline, access control and cost management.
+
 \subsection{Architecture Overview}
-\plan{This subsection presents the deployment on Google Cloud as one figure and walks through it from the user's request to the data stores. It names every managed product that the system uses and states which component runs inside the Kubernetes cluster and which runs outside it.}
+\label{sec:arch-overview}
+
+\Cref{fig:deployment} shows the deployment. All resources belong to one Google Cloud project in the \code{us-central1} region and share one Virtual Private Cloud (VPC) network. A Google Kubernetes Engine (GKE) cluster runs the stateless services, DynaStore, Kafka and the platform components. These platform components are the edge proxy, the GitOps controller and the monitoring stack. Managed services outside the cluster hold the relational, document and object data. They also run the notification function and the stream processing job.
+
+A request from a customer travels as follows. The browser resolves the public host name to the address of a Google load balancer. The load balancer forwards the connection to Traefik, an edge proxy inside the cluster that terminates HTTPS. Traefik passes the request to the API Gateway, which authenticates it and calls the internal services. These services read and write Cloud SQL, Firestore, Cloud Storage and DynaStore. They publish events to Kafka and notification requests to Pub/Sub. The Flink job on Dataproc consumes the Kafka events, and the Cloud Function consumes the Pub/Sub messages. Cloud Logging collects the logs of every component, and Prometheus collects the metrics of every service.
 
 \mermaidplaceholder{deployment}{Cloud deployment architecture of \project{} on Google Cloud.}{Users and the load test reach a Google load balancer, then Traefik and the API Gateway in GKE. The bank namespace holds the services, DynaStore and Kafka. Cloud SQL, Firestore, Cloud Storage, Pub/Sub, the Cloud Function, Dataproc, Secret Manager, Artifact Registry and Cloud Logging sit around the cluster inside one VPC.}{7cm}
 
 \subsection{Compute Platform}
-\plan{This subsection describes the zonal GKE cluster, its Spot node pool and its namespaces. It explains why the services tolerate the loss of a Spot node, which is that they are stateless and that DynaStore and Kafka keep their data on persistent disks.}
+\label{sec:compute}
+
+GKE hosts the containerised workloads. The cluster is zonal and runs in \code{us-central1-a}. It follows the regular release channel, so Google applies tested Kubernetes upgrades automatically. The cluster uses GKE Dataplane V2, which enforces Kubernetes network policies in the data path.
+
+One node pool provides the compute capacity. Its nodes are \code{e2-standard-4} machines with four virtual CPUs and 16\,GB of memory each. The pool normally runs two nodes, and an operator can raise the count through Terraform when a load test needs more capacity. The nodes are Spot virtual machines. Google offers Spot capacity at a large discount, but it may reclaim a Spot machine at short notice. The workloads tolerate such a loss. The services keep no state in their pods, so Kubernetes simply restarts them on the remaining node. DynaStore and Kafka keep their data on persistent disks, which survive the loss of a node.
+
+Workloads live in separate namespaces. The \code{bank} namespace holds the twelve services, DynaStore and the scheduled jobs. Other namespaces hold Kafka, Traefik, cert-manager, ArgoCD and the monitoring stack. This separation lets each component carry its own access rules and network policies.
 
 \subsection{Networking and Edge}
-\plan{This subsection describes the single VPC, the private IP of Cloud SQL, and the path from the internet to the gateway. Traffic passes a Google load balancer and Traefik, which terminates HTTPS with a certificate from cert-manager and Let's Encrypt. A scheduled job keeps the DuckDNS names pointed at the load balancer. A NetworkPolicy prevents traffic from outside the namespace from reaching internal services.}
+\label{sec:network}
+
+The VPC has one subnet for the nodes and two secondary ranges for pods and Kubernetes services. A firewall rule admits traffic between these internal ranges. A second rule admits SSH only from the address range of Google's Identity-Aware Proxy. Operators can therefore reach the Dataproc machine without exposing it to the internet.
+
+Cloud SQL has only a private IP address. The VPC reaches it through Private Service Access, a peering between the VPC and the network that Google manages for the database. No address outside the VPC can connect to the database.
+
+The public edge consists of a Google load balancer and Traefik. Kubernetes creates the load balancer for the Traefik service, which keeps the client address intact on its way to the pods. Traefik runs as two to four replicas under an autoscaler and a disruption budget. It terminates HTTPS with a certificate that cert-manager obtains from Let's Encrypt. Traefik redirects every plain HTTP request to HTTPS and sends a Strict-Transport-Security header, which tells browsers to use HTTPS for all later visits. Two DuckDNS host names point at the load balancer. The public address of the load balancer changes when the environment is recreated. A scheduled job therefore checks the address every two minutes and updates both names.
+
+Inside the cluster, a network policy in the \code{bank} namespace admits traffic only from the same namespace and from the edge proxy. The API Gateway is therefore the only service that external traffic can reach. The internal services accept requests from the gateway and from one another.
 
 \subsection{Managed Cloud Services}
-\plan{This subsection describes each managed service briefly and the purpose it serves in the system. It covers Cloud SQL, Firestore, Cloud Storage, Pub/Sub, Cloud Functions, Dataproc, Secret Manager and Artifact Registry.}
+\label{sec:managed}
+
+\Cref{tab:managed} lists the managed services and the purpose of each one. \Cref{sec:data} explains why each kind of data lives in its particular store.
+
+\begin{table}[htbp]\centering\small
+\caption{Managed Google Cloud services used by \project{}.}\label{tab:managed}
+\begin{tabularx}{\linewidth}{@{}L{3.4cm}Y@{}}
+\toprule
+Service & Purpose in the system \\
+\midrule
+GKE & Hosts the stateless services, DynaStore, Kafka and the platform components \\
+Cloud SQL for PostgreSQL & Holds customers, accounts, the ledger, payments, deposits, credentials and cases, with one database user and schema for each service \\
+Firestore & Holds sessions, login events, alerts, the notification inbox and analytics snapshots \\
+Cloud Storage & Holds KYC documents, statements, end-of-day reports, Flink files and checkpoints, function source and Terraform state \\
+Pub/Sub & Carries notification requests to the serverless function \\
+Cloud Functions & Runs the Notification Service, which scales from zero to three instances \\
+Dataproc & Runs the Flink stream processing job on a single-node cluster \\
+Secret Manager & Stores database passwords, signing keys and provider credentials \\
+Artifact Registry & Stores the container images that the delivery pipeline builds \\
+Cloud Logging & Collects the logs of every container and of the Dataproc job \\
+\bottomrule
+\end{tabularx}
+\end{table}
 
 \subsection{Infrastructure as Code}
 \label{sec:iac}
-\plan{This subsection explains that Terraform provisions every cloud resource and that no resource is created by hand in the console. It describes the three Terraform layers and what each layer owns. It also describes how the state is kept in a Cloud Storage bucket and how secrets are generated by Terraform and stored in Secret Manager.}
+
+Terraform provisions every cloud resource of the system, and no resource is created by hand in the console. Terraform describes the desired state of the resources in configuration files and changes the cloud to match. The configuration is split into three layers, which \cref{fig:terraform-layers} shows. Each layer has its own state and depends on the outputs of the layer below it.
+
+The bootstrap layer creates the foundation. It creates the project, enables the required APIs and grants the team members their roles. It also creates the bucket that stores the Terraform state of the other layers. It sets up Workload Identity Federation for GitHub Actions and creates budget alerts for each billing account. The main layer creates the workload infrastructure. It contains the network, the GKE cluster, Cloud SQL, Firestore and the storage buckets. It also contains the Pub/Sub topic, the Cloud Function, the Dataproc cluster, the service accounts and the secrets. The platform layer works inside the cluster. It creates the \code{bank} namespace, copies the secrets into Kubernetes, and installs ArgoCD together with its root application.
+
+Terraform also generates the secrets. It creates a random password for each database user and a random key for signing tokens, and it stores them in Secret Manager. The configuration therefore never contains a secret, and the repository holds only example variable files. The Terraform state lives in a versioned Cloud Storage bucket, so every operator works from the same state.
 
 \mermaidplaceholder{terraform-layers}{Layers of the Terraform configuration and the resources each layer manages.}{Three stacked layers, bootstrap, main and platform, with the resources each one creates and the dependencies between them.}{5cm}
 
 \subsection{Continuous Delivery and GitOps}
 \label{sec:gitops}
-\plan{This subsection describes the delivery pipeline from a commit to a running pod. GitHub Actions tests the code, builds an image for each service and opens a deployment pull request that changes the image tags. Merging that pull request is the release, and ArgoCD applies it to the cluster. The subsection explains the app-of-apps structure, the self-healing behaviour, and how database migrations run as a pre-sync job.}
+
+GitOps is a deployment practice in which a Git repository holds the desired state of the system. A controller then keeps the running system equal to that state. \project{} follows this practice with ArgoCD, and nothing deploys a service with \code{kubectl apply}. \Cref{fig:gitops} shows the pipeline from a commit to a running pod.
+
+Every push to the main branch starts the continuous integration workflow in GitHub Actions. The workflow runs the unit tests of every service, the tests of the serverless function and the Flink SQL tests. It also validates the Kubernetes manifests, checks the Terraform configuration and builds the web application. When a push changes service code, a release workflow builds a container image for every service. It tags each image with the commit identifier and pushes it to Artifact Registry. The workflow authenticates to Google Cloud through Workload Identity Federation, so it holds no long-lived key. The workflow then opens a deployment pull request that changes only the image tags in the Kustomize configuration of the \code{bank} namespace.
+
+Merging the deployment pull request is the release. ArgoCD tracks the main branch and detects the change within three minutes. It first runs the database migrations of each service as a pre-sync job. It then rolls out the new pods one at a time, so the service stays available during the update. ArgoCD runs with automatic synchronisation, self-healing and pruning. Self-healing reverts any manual change to the cluster, and pruning removes any resource that the repository no longer declares.
+
+ArgoCD manages nine applications through the app-of-apps pattern. In this pattern, a root application declares the other applications as its resources. The root application declares the bank services, the Kafka operator and cluster, the monitoring stack and its dashboards, cert-manager, Traefik and the edge configuration. Third-party components such as Traefik and the monitoring stack come from Helm charts with pinned versions. The bank services come from plain manifests that a script generates from one description of all services.
 
 \mermaidplaceholder{gitops}{Delivery pipeline from a commit to the cluster through GitHub Actions and ArgoCD.}{A commit to main triggers CI and the image build, which push to Artifact Registry and open a deploy pull request. Merging it updates the manifests on main, and ArgoCD syncs the cluster after running migrations.}{5cm}
 
 \subsection{Identity and Access Management}
-\plan{This subsection describes how workloads authenticate to Google APIs through Workload Identity without key files, and how GitHub Actions authenticates through Workload Identity Federation. It also describes the least-privilege design, in which each service has its own database user and only the Identity service can read the KYC bucket.}
+\label{sec:iam}
+
+Each component receives only the permissions it needs. The system defines separate Google service accounts for the cluster nodes, the application services and the Identity service. Further accounts serve the notification function, its build, the Dataproc cluster and the delivery pipeline.
+
+Pods authenticate to Google APIs through Workload Identity. This GKE feature maps a Kubernetes service account to a Google service account, so pods obtain short-lived credentials without any key file. Only three services call Google APIs directly, and only these three receive such a mapping. The Identity service has its own Google service account, and only this account may read the bucket that holds KYC documents.
+
+Access to the database follows the same principle. Each service connects as its own database user and owns its own schema. A fault or a compromise in one service therefore cannot read or change the tables of another service. The containers run as a non-root user.
 
 \subsection{Cost Management}
-\plan{This subsection explains how the design keeps the cost within the available cloud credit. It covers the zonal cluster, the Spot nodes, the scale-to-zero command that stops the nodes, the database and Dataproc, and the budget alerts.}
+\label{sec:cost}
 
+The design keeps the running cost within the available cloud credit. GKE charges no management fee for one zonal cluster, and Spot nodes cost a fraction of regular nodes. The database runs on a small shared-core tier. The notification function scales to zero instances when no messages arrive. Dataproc runs only during stream processing tests and demonstrations.
+
+A single command stops the environment between working sessions. It scales the node pool to zero, stops the Cloud SQL instance and deletes the Dataproc cluster, all through Terraform. A second command restores the environment in a few minutes, and ArgoCD then brings every workload back from the repository. Budget alerts notify the team by email when spending reaches 30, 60 and 80 percent of the budget of each billing account.
 
 % =====================================================================  4
 \section{Microservices Architecture}

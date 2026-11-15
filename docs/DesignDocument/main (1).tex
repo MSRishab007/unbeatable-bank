@@ -1,0 +1,573 @@
+% UNBank design document. Compiles with pdflatex on Overleaf or with latexmk -pdf main.tex.
+% Mermaid diagrams go in figures/ as PDF (mmdc -i x.mmd -o x.pdf) and replace the
+% \mermaidplaceholder boxes. Remove every \plan{...} box before submission.
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage[a4paper,margin=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage[hidelinks]{hyperref}
+\usepackage[nameinlink,capitalise]{cleveref}
+
+\definecolor{planbg}{HTML}{EEF2FB}
+\definecolor{planrule}{HTML}{2D2AE6}
+\definecolor{figbg}{HTML}{F5F5F7}
+
+\newcommand{\project}{Unbeatable Bank}
+\newcommand{\repourl}{\url{https://github.com/MSRishab007/unbeatable-bank}}
+\newcommand{\liveurl}{\url{https://unbeatable-bank.duckdns.org}}
+\newcommand{\code}[1]{\texttt{#1}}
+
+% Drafting aid: what a section will contain. Delete before submission.
+\newcommand{\plan}[1]{%
+  \par\noindent\fcolorbox{planrule}{planbg}{\parbox{\dimexpr\linewidth-2\fboxsep-2\fboxrule}{\small\textbf{Section plan.} #1}}\par\medskip}
+
+% Placeholder for a Mermaid diagram exported to PDF later.
+% #1 label, #2 caption, #3 what the diagram shows, #4 height
+\newcommand{\mermaidplaceholder}[4]{%
+  \begin{figure}[H]\centering
+  \fcolorbox{gray}{figbg}{\parbox[c][#4][c]{0.9\linewidth}{\centering\small\textit{Mermaid diagram to be inserted.}\\[4pt]#3\\[4pt]\texttt{figures/#1.pdf}}}
+  \caption{#2}\label{fig:#1}
+  \end{figure}}
+
+% Placeholder for a screenshot.
+\newcommand{\screenshotplaceholder}[4]{%
+  \begin{figure}[H]\centering
+  \fcolorbox{gray}{white}{\parbox[c][#4][c]{0.9\linewidth}{\centering\small\textit{Screenshot to be inserted.}\\[4pt]#3\\[4pt]\texttt{figures/#1.png}}}
+  \caption{#2}\label{fig:#1}
+  \end{figure}}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small \project{}}
+\fancyhead[R]{\small Design Document}
+\fancyfoot[C]{\small \thepage}
+
+\setlist[itemize]{leftmargin=1.5em,itemsep=2pt}
+\captionsetup{font=small,labelfont=bf}
+
+\begin{document}
+
+% =====================================================================  title page
+\begin{titlepage}
+\centering
+{\large Birla Institute of Technology and Science, Pilani\par}
+\vspace{2.5cm}
+{\Huge\bfseries \project{}\par}
+\vspace{0.4cm}
+{\Large Design of a Cloud-Native Retail Banking Platform\\for Transaction Monitoring\par}
+\vspace{0.6cm}
+{\large Design Document\par}
+\vspace{1.5cm}
+{\normalsize Scenario: Banking Transaction Monitoring\\Concept: Leaderless Replication and Dynamo-Style Storage\par}
+\vspace{2cm}
+\begin{tabular}{ll}
+\toprule
+\textbf{ID number} & \textbf{Name} \\
+\midrule
+20XXXXXXXXXX & Member 1 \\
+20XXXXXXXXXX & Member 2 \\
+20XXXXXXXXXX & Member 3 \\
+20XXXXXXXXXX & Member 4 \\
+\bottomrule
+\end{tabular}
+\vfill
+{\small Source repository: \repourl\\[2pt]
+Live deployment (available during the demonstration): \liveurl\par}
+\vspace{0.5cm}
+{\small November 2026\par}
+\end{titlepage}
+
+% =====================================================================  abstract
+\begin{abstract}
+\plan{The abstract summarises the problem, the system and the main results in one paragraph of about 200 words. It names the twelve services, the cloud platform, the leaderless replication store and the stream processing job. It closes with the measured outcome of the load test, in which the platform served sustained traffic with an error rate of 0.01\% and a 95th percentile latency of 1.4 seconds.}
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+% =====================================================================  1
+\section{Introduction}
+\label{sec:introduction}
+
+\subsection{Scenario and Objectives}
+\label{sec:scenario}
+
+A retail bank processes a continuous stream of payments, and a small share of them is fraudulent or abusive. The bank must decide within a fraction of a second whether to admit each payment. It must also watch the stream over minutes and hours for patterns that no single payment reveals. A collection account that receives money from many unrelated customers is one such pattern. A series of payments kept just below a reporting threshold is another.
+
+This document presents \project{}, a cloud-native retail banking platform built for scenario S17, Banking Transaction Monitoring. The scenario covers transaction admission and fraud monitoring. It pairs this domain with the concept of leaderless replication in a storage system modelled on Amazon's Dynamo~\cite{dynamo}.
+
+The scenario suggests eight microservices. These are the Account, Transaction Intake, Rate Limit Coordinator, Ledger, Risk Detection, Fraud Alert, Notification and Audit Analytics services. The platform implements all eight of them. It adds four services that a working bank needs. They are an API Gateway, an Identity and Authentication service, a Deposits service, and DynaStore, a purpose-built Dynamo-style key-value store. The platform runs on Google Cloud. Customers use it through a public web application, and bank staff use a console within the same application.
+
+The platform follows current practice for cloud-native systems. Code provisions all of its infrastructure. A serverless function performs asynchronous work, and the services communicate through REST, gRPC and message queues. A managed Kubernetes service hosts the stateless services and scales them with horizontal pod autoscalers. A GitOps controller performs every deployment. A stream processing job on a managed cluster analyses the transaction stream. The data sits in several cloud storage products, and a monitoring and logging stack observes the whole system. \Cref{sec:traceability} maps each of these properties to the part of the system that provides it.
+
+The project pursues three further objectives. First, every payment passes several independent checks before any money moves. Second, the system continues to answer when individual components fail. Third, every change to the infrastructure or the software reaches the cloud through version control, and no change is made by hand.
+
+\subsection{Guiding Design Principles}
+\label{sec:principles}
+
+Four principles guide the design. The first two concern data, and they lead to the most important decision in the system.
+
+\paragraph{Consistency where money moves.} Money must never be created, lost or moved twice. This property requires strong consistency. The system therefore keeps balances and journal entries in a relational database, and only the Ledger service may change them. Each debit runs in a single database transaction, and database constraints reject any journal whose debits and credits do not balance.
+
+\paragraph{Availability where admission is decided.} Admission control must answer quickly on every request, including when parts of the system fail. The rate limiter and the risk engine update counters and features on every request. A value that is a few milliseconds old does no harm to these decisions. Such data suits leaderless replication, in which every replica accepts reads and writes and a request succeeds once a quorum of replicas has answered. The system keeps this data in DynaStore. The separation of the two kinds of data, each in a store with the guarantees it needs, is the central design decision of \project{}.
+
+\paragraph{Defence in depth.} No single check can stop every attack. Each payment therefore passes five layers, which are admission control, authorisation and policy, real-time risk scoring, stream analytics and case management. A payment that one layer misses can still be caught by another, and the slower layers feed what they learn back into the faster ones.
+
+\paragraph{Everything declared in Git.} Terraform describes all cloud resources, and Kubernetes manifests describe all workloads. A release happens when a pull request that changes the image versions is merged. ArgoCD then brings the cluster in line with the repository. The repository therefore records the complete state of the system at every point in its history.
+
+\subsection{Contributions}
+\label{sec:contributions}
+
+This project makes the following contributions.
+
+\begin{itemize}
+\item A layered model for payment admission. It combines distributed rate limiting, identity-based controls, a real-time risk engine with 21 weighted rules, streaming pattern detection, and case management with a maker-checker rule.
+\item DynaStore, a leaderless key-value store that reproduces the main techniques of Dynamo. These include consistent hashing, tunable quorums, vector clocks, conflict-free replicated counters, hinted handoff, read repair and anti-entropy.
+\item A Flink SQL job on Dataproc that computes per-minute transaction statistics, including the number of unique customers. The job also detects four fraud patterns and feeds them back into the real-time risk engine.
+\item A fully automated delivery process. Terraform provisions all infrastructure, GitHub Actions tests the code and builds the images, and ArgoCD deploys every release from the repository.
+\item An evaluation with three load test runs and a fraud simulator of eight attack scenarios. In the final load test, 0.01\% of requests failed and 95\% of requests completed within 1.4 seconds. In the simulator, at least one layer stopped every attack scenario, while an ordinary customer passed without friction.
+\end{itemize}
+
+\subsection{Artefact Availability}
+\label{sec:artefacts}
+
+The source repository is available at \repourl{}. It contains the code of all twelve services, the Terraform configuration, the Kubernetes manifests, the ArgoCD configuration and the automated tests. The file \code{task\_division.txt} in the repository lists the team members and the tasks assigned to each of them.
+
+The deployed system is reachable at \liveurl{} during demonstrations and test runs. Outside these periods, the cluster scales to zero nodes and the database stops, which keeps the cost within the available cloud credit. The address may therefore not respond at other times. The deployment guide in the repository describes how to recreate the full environment in a new Google Cloud project.
+
+\subsection{Document Organisation}
+\label{sec:organisation}
+
+The rest of this document is organised as follows. \Cref{sec:overview} gives an overview of the system and maps its requirements to the implementation. \Cref{sec:deployment} describes the cloud deployment architecture, including the infrastructure code and the delivery pipeline. \Cref{sec:microservices} describes the microservices and their responsibilities, and \cref{sec:interconnection} describes how they communicate. \Cref{sec:fraud} presents the techniques for transaction admission and fraud detection in depth. \Cref{sec:data} describes the data architecture, including DynaStore and the stream processing job. \Cref{sec:quality} evaluates scalability, resilience, observability and security. \Cref{sec:rationale} collects the rationale for the main design choices, and \cref{sec:conclusion} discusses limitations and concludes the document.
+
+% =====================================================================  2
+\section{System Overview}
+\label{sec:overview}
+
+\subsection{Functional Scope}
+\plan{This subsection describes what customers and staff can do. Customers register, complete KYC, open savings, current, fixed deposit and recurring deposit accounts, pay by account number, pay ID or QR code, and manage their security settings. Staff members review KYC documents, work fraud cases, approve sensitive actions under a maker-checker rule, and run the branch desk.}
+
+\screenshotplaceholder{app-overview}{Customer application showing the home screen and the payment flow.}{Phone screenshots of Home, Pay with the swipe control, and the payment result with its six checks.}{5cm}
+
+\subsection{Layered Payment Defence}
+\plan{This subsection introduces the five layers that every payment passes through, from admission control to fraud response, in one table and one paragraph. \Cref{sec:fraud} describes each layer in depth.}
+
+\begin{table}[H]\centering\small
+\caption{Layers of defence applied to each payment.}\label{tab:layers}
+\begin{tabularx}{\linewidth}{@{}lllX@{}}
+\toprule
+Layer & Time scale & Service & Technique \\
+\midrule
+Admission & Before processing & Rate Limit Coordinator & \\
+Authorisation and policy & Synchronous & Account, Transaction Intake & \\
+Real-time risk & Tens of milliseconds & Risk Detection & \\
+Stream analytics & Seconds to minutes & Audit Analytics (Flink) & \\
+Response & Minutes & Fraud Alert & \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+
+\subsection{Mapping to the Scenario Services}
+\label{sec:s17map}
+\plan{This subsection lists the eight services that scenario S17 suggests and the \project{} service that implements each one. It then explains the four services that the team added, which are the API Gateway, the Identity and Authentication service, the Deposits service and DynaStore, and why a working bank needs each of them.}
+
+\begin{table}[H]\centering\small
+\caption{Services suggested by scenario S17 and their implementation in \project{}.}\label{tab:s17}
+\begin{tabularx}{\linewidth}{@{}lXl@{}}
+\toprule
+Scenario service & Role in the scenario & \project{} service \\
+\midrule
+Account Service & Maintains simulated account metadata & Account \\
+Transaction Intake Service & Accepts transaction requests & Transaction Intake \\
+Rate Limit Coordinator & Shared rate-limit state and permit allocation & Rate Limit Coordinator \\
+Ledger Service & Records accepted transactions & Ledger \\
+Risk Detection Service & Evaluates transactions against risk rules & Risk Detection \\
+Fraud Alert Service & Reports suspicious transaction patterns & Fraud Alert \\
+Notification Service & Sends transaction outcomes & Notification (Cloud Function) \\
+Audit Analytics Service & Measures rate-limit decisions, throughput and rejections & Audit Analytics (Flink) \\
+\midrule
+\multicolumn{3}{@{}l}{Added by the team: API Gateway, Identity and Authentication, Deposits and End of Day, DynaStore} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Requirement Traceability}
+\label{sec:traceability}
+\plan{This subsection maps each platform requirement to the part of the system that meets it and to the location in the repository. The table lets the reader verify coverage at a glance, and the text points to the section that discusses each requirement in depth.}
+
+\begin{table}[H]\centering\small
+\caption{Mapping of platform requirements to the implementation.}\label{tab:traceability}
+\begin{tabularx}{\linewidth}{@{}lXl@{}}
+\toprule
+Requirement & Implementation & Section \\
+\midrule
+Infrastructure as Code & & \cref{sec:iac} \\
+Serverless function and communication & & \cref{sec:interconnection} \\
+Managed Kubernetes, autoscaling and load test & & \cref{sec:scalability} \\
+GitOps controller & & \cref{sec:gitops} \\
+Stream processing on a managed cluster & & \cref{sec:streaming} \\
+Leaderless replication concept & & \cref{sec:concept} \\
+Multiple storage products & & \cref{sec:storage} \\
+Observability & & \cref{sec:observability} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+
+% =====================================================================  3
+\section{Cloud Deployment Architecture}
+\label{sec:deployment}
+
+\subsection{Architecture Overview}
+\plan{This subsection presents the deployment on Google Cloud as one figure and walks through it from the user's request to the data stores. It names every managed product that the system uses and states which component runs inside the Kubernetes cluster and which runs outside it.}
+
+\mermaidplaceholder{deployment}{Cloud deployment architecture of \project{} on Google Cloud.}{Users and the load test reach a Google load balancer, then Traefik and the API Gateway in GKE. The bank namespace holds the services, DynaStore and Kafka. Cloud SQL, Firestore, Cloud Storage, Pub/Sub, the Cloud Function, Dataproc, Secret Manager, Artifact Registry and Cloud Logging sit around the cluster inside one VPC.}{7cm}
+
+\subsection{Compute Platform}
+\plan{This subsection describes the zonal GKE cluster, its Spot node pool and its namespaces. It explains why the services tolerate the loss of a Spot node, which is that they are stateless and that DynaStore and Kafka keep their data on persistent disks.}
+
+\subsection{Networking and Edge}
+\plan{This subsection describes the single VPC, the private IP of Cloud SQL, and the path from the internet to the gateway. Traffic passes a Google load balancer and Traefik, which terminates HTTPS with a certificate from cert-manager and Let's Encrypt. A scheduled job keeps the DuckDNS names pointed at the load balancer. A NetworkPolicy prevents traffic from outside the namespace from reaching internal services.}
+
+\subsection{Managed Cloud Services}
+\plan{This subsection describes each managed service briefly and the purpose it serves in the system. It covers Cloud SQL, Firestore, Cloud Storage, Pub/Sub, Cloud Functions, Dataproc, Secret Manager and Artifact Registry.}
+
+\subsection{Infrastructure as Code}
+\label{sec:iac}
+\plan{This subsection explains that Terraform provisions every cloud resource and that no resource is created by hand in the console. It describes the three Terraform layers and what each layer owns. It also describes how the state is kept in a Cloud Storage bucket and how secrets are generated by Terraform and stored in Secret Manager.}
+
+\mermaidplaceholder{terraform-layers}{Layers of the Terraform configuration and the resources each layer manages.}{Three stacked layers, bootstrap, main and platform, with the resources each one creates and the dependencies between them.}{5cm}
+
+\subsection{Continuous Delivery and GitOps}
+\label{sec:gitops}
+\plan{This subsection describes the delivery pipeline from a commit to a running pod. GitHub Actions tests the code, builds an image for each service and opens a deployment pull request that changes the image tags. Merging that pull request is the release, and ArgoCD applies it to the cluster. The subsection explains the app-of-apps structure, the self-healing behaviour, and how database migrations run as a pre-sync job.}
+
+\mermaidplaceholder{gitops}{Delivery pipeline from a commit to the cluster through GitHub Actions and ArgoCD.}{A commit to main triggers CI and the image build, which push to Artifact Registry and open a deploy pull request. Merging it updates the manifests on main, and ArgoCD syncs the cluster after running migrations.}{5cm}
+
+\subsection{Identity and Access Management}
+\plan{This subsection describes how workloads authenticate to Google APIs through Workload Identity without key files, and how GitHub Actions authenticates through Workload Identity Federation. It also describes the least-privilege design, in which each service has its own database user and only the Identity service can read the KYC bucket.}
+
+\subsection{Cost Management}
+\plan{This subsection explains how the design keeps the cost within the available cloud credit. It covers the zonal cluster, the Spot nodes, the scale-to-zero command that stops the nodes, the database and Dataproc, and the budget alerts.}
+
+
+% =====================================================================  4
+\section{Microservices Architecture}
+\label{sec:microservices}
+
+\subsection{Service Decomposition}
+\plan{This subsection presents the twelve services and the calls between them in one figure. It explains the principle behind the decomposition, which is that each service owns one business capability and its own data, and that the eight services suggested for the scenario are extended with four services that make the bank complete.}
+
+\mermaidplaceholder{services}{Microservices of \project{} and the interactions between them.}{The gateway calls the services over REST. Intake calls Rate Limit, Risk and Ledger over gRPC. Rate Limit and Risk use DynaStore. Kafka carries events to Flink and Fraud Alert, and Pub/Sub carries notifications to the Cloud Function.}{8cm}
+
+\subsection{Service Responsibilities}
+\plan{This subsection describes each service in its own paragraph, grouped by area. The groups are the edge and identity services, the core banking services, the admission control services, the fraud and analytics services, the deposits service, and DynaStore. Each paragraph states what the service is responsible for, where it runs and which data it owns. A summary table follows the paragraphs.}
+
+\begin{longtable}{@{}p{0.5cm}p{3.2cm}p{7.6cm}p{2.6cm}@{}}
+\caption{Responsibilities, runtime and data ownership of each service.}\label{tab:services}\\
+\toprule
+No. & Service & Responsibility & Runs on and data \\
+\midrule\endhead
+1 & API Gateway & & \\
+2 & Identity and Auth & & \\
+3 & Account & & \\
+4 & Transaction Intake & & \\
+5 & Rate Limit Coordinator & & \\
+6 & Ledger & & \\
+7 & Risk Detection & & \\
+8 & Fraud Alert & & \\
+9 & Notification Service & & \\
+10 & Audit Analytics & & \\
+11 & Deposits and End of Day & & \\
+12 & DynaStore & & \\
+\bottomrule
+\end{longtable}
+
+\subsection{Lifecycle of a Payment}
+\plan{This subsection follows one payment from the customer's request to the ledger entry and the notification. A sequence diagram shows the order of the calls and the six checks. The text explains the possible outcomes, which are completion, an OTP challenge, a hold for analyst review, and a decline.}
+
+\mermaidplaceholder{payment-sequence}{Sequence of calls for a single payment.}{The client, gateway, Intake, Rate Limit, Account, Risk, Ledger, Kafka and the Notification function, with the PIN check, the idempotency check, the risk decision and the double-entry posting.}{9cm}
+
+\subsection{Client Applications}
+\plan{This subsection describes the two web applications that the gateway serves. The customer application is built with React and the original application keeps the staff console. The subsection explains why serving them from the gateway avoids a second public endpoint and any cross-origin configuration.}
+
+
+% =====================================================================  5
+\section{Interconnection Mechanisms}
+\label{sec:interconnection}
+
+\subsection{Overview}
+\plan{This subsection introduces the four mechanisms and states the rule that decides which one each interaction uses. Request and response at human speed use REST, calls on the hot path of every payment use gRPC, durable event streams use Kafka, and the trigger of the serverless function uses Pub/Sub.}
+
+\mermaidplaceholder{communication}{Communication mechanisms used between services.}{The same services as the decomposition figure, with REST, gRPC, Kafka and Pub/Sub links drawn in four different line styles and a legend.}{7cm}
+
+\subsection{REST}
+\plan{This subsection describes the REST interfaces between the client and the gateway and between services. It explains the trust boundary, in which the gateway verifies the token and sets the actor header itself.}
+
+\subsection{gRPC}
+\plan{This subsection describes the gRPC contracts in the proto directory and the calls that use them. It explains the benefits for frequent calls, which are binary framing, typed contracts, deadlines and status codes. It also explains how clients balance load across autoscaled pods.}
+
+\subsection{Event Streaming with Kafka}
+\plan{This subsection describes the Kafka cluster that runs in GKE under the Strimzi operator and lists the topics with their producers and consumers in a table. It explains why the event stream decouples the payment path from analytics and fraud response.}
+
+\subsection{Transactional Outbox}
+\plan{This subsection explains the transactional outbox pattern. A service writes an event into an outbox table in the same database transaction as the business change, and a relay publishes it afterwards. An event therefore exists exactly when the change has committed. Delivery is at least once, and every consumer is idempotent.}
+
+\mermaidplaceholder{outbox}{Transactional outbox between a service database and Kafka.}{A service writes the business row and the outbox row in one transaction. The relay sidecar reads the outbox and publishes to Kafka, and consumers deduplicate by event identifier.}{4.5cm}
+
+\subsection{Serverless Notification with Pub/Sub}
+\plan{This subsection describes the Notification Service as a Cloud Function triggered by Pub/Sub. It explains the asynchronous and event-driven behaviour, the retry policy, the per-message channel selection for the inbox, email and RCS, and the switch between email providers.}
+
+
+% =====================================================================  6
+\section{Transaction Admission and Fraud Detection}
+\label{sec:fraud}
+
+\subsection{Threat Model}
+\plan{This subsection describes the attacks that the system defends against. They are a stolen password, a full account takeover in which the attacker also holds the SIM and the PIN, automated payment bots, card-testing probes with tiny amounts, structuring of large sums just below the reporting threshold, mule rings that collect money from many victims, and misuse by bank staff.}
+
+\subsection{Defence in Depth}
+\plan{This subsection explains the five layers and the principle of defence in depth, under which several independent checks stop an attack that any single check would miss. A diagram shows the path of a payment through the layers and the possible decisions.}
+
+\mermaidplaceholder{fraud-layers}{Path of a payment through the five layers of defence and the decisions each layer can take.}{A payment enters admission control, then authorisation and policy, then risk scoring with its four score bands. Accepted payments reach the ledger and the event stream, where stream analytics and the fraud service act after the fact and feed signals back.}{7cm}
+
+\subsection{Admission Control}
+\plan{This subsection describes the distributed rate limiter. It covers the sliding-window policies for customers, accounts, devices, IP addresses and logins, the permit leases that reduce calls to the store, the conflict-free counters in DynaStore, and the degraded mode in which small payments proceed and large payments stop when the limiter is unreachable.}
+
+\subsection{Identity-Based Controls}
+\plan{This subsection describes the controls that bind a payment to a verified person and device. It covers the new-device code, the payment PIN and the app PIN with lockout, the idle session lock, the delay before a raised limit takes effect, the cooling period for new payees, and the signals raised when contact details change or a refresh token is replayed.}
+
+\subsection{Real-Time Risk Scoring}
+\plan{This subsection describes the risk engine. It explains how DynaStore holds the risk features, lists the 21 rules with their weights in a table, and explains the four score bands. It argues why a weak signal alone can never block a payment, and describes the one-time password challenge, the analyst hold, shadow mode for new rules, and the reasons that the customer sees.}
+
+\begin{longtable}{@{}p{4.2cm}p{1.2cm}p{8.4cm}@{}}
+\caption{Rules of the real-time risk engine and their weights.}\label{tab:rules}\\
+\toprule
+Rule & Weight & Condition \\
+\midrule\endhead
+\bottomrule
+\end{longtable}
+
+\subsection{Stream Pattern Detection}
+\plan{This subsection describes the four patterns that the Flink job detects, namely bursts, micro-payment probing, structuring and mule fan-in, with their windows and thresholds. It explains why no single payment reveals these patterns, and how the fraud service writes signals back into DynaStore so that the risk engine scores the next payment from a flagged account higher.}
+
+\subsection{Response and Case Management}
+\plan{This subsection describes the fraud service. It covers alerts, automatic freezes, the deny list, cases, and the maker-checker rule for unfreezing an account. It also describes the controls that customers hold, which are cancelling a held payment, reporting a payment and blocking all access in one action.}
+
+\subsection{Evaluation with a Fraud Simulator}
+\plan{This subsection reports the results of the fraud simulator, which runs eight scenarios against the live system. A table lists each attack, the layer that caught it and the outcome. The subsection closes with the limits of the evaluation, which are that the rule weights are set by hand and tested on synthetic data.}
+
+\begin{table}[H]\centering\small
+\caption{Outcome of the eight fraud simulator scenarios.}\label{tab:simulator}
+\begin{tabularx}{\linewidth}{@{}lXl@{}}
+\toprule
+Scenario & Layer that responded & Outcome \\
+\midrule
+Ordinary customer & None & Not disturbed \\
+Payment bot & & \\
+Stolen password & & \\
+Account takeover & & \\
+Micro-payment probing & & \\
+Structuring & & \\
+Fixed deposit break and transfer & & \\
+Mule ring & & \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+% =====================================================================  7
+\section{Data Architecture}
+\label{sec:data}
+\plan{This section describes the three kinds of data in the system and the store chosen for each. It covers the storage products, the leaderless store that implements the assigned concept, and the stream processing job that turns the event stream into statistics and signals.}
+\subsection{Storage Products and Data Ownership}
+\label{sec:storage}
+\plan{This section describes each storage product, the data it holds and the reason for the choice. It covers Cloud SQL for PostgreSQL, Firestore, Cloud Storage, DynaStore and Kafka. It also explains how schema migrations follow Git through the pre-sync job, and how KYC documents and statements are stored and protected.}
+
+\begin{table}[H]\centering\small
+\caption{Storage products, the data each one holds, and the reason for the choice.}\label{tab:storage}
+\begin{tabularx}{\linewidth}{@{}p{3cm}XX@{}}
+\toprule
+Product & Data held & Reason for the choice \\
+\midrule
+Cloud SQL (PostgreSQL) & & \\
+Firestore & & \\
+Cloud Storage & & \\
+DynaStore & & \\
+Kafka & & \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Leaderless Replication in DynaStore}
+\label{sec:concept}
+
+\subsubsection{Motivation}
+\plan{This subsection explains why rate-limit counters and fraud features suit leaderless replication. They are written on every request, they tolerate slight staleness, and they must survive node failures.}
+
+\subsubsection{Partitioning with Consistent Hashing}
+\plan{This subsection describes the hash ring with virtual nodes and the preference list of each key.}
+
+\mermaidplaceholder{dynastore-ring}{Consistent hashing ring of the three DynaStore nodes and the preference list of one key.}{A ring with virtual node positions for three nodes and one key placed on it, with arrows to the first three distinct nodes clockwise.}{6cm}
+
+\subsubsection{Replication and Tunable Quorums}
+\plan{This subsection describes replication with N equal to 3, and the read and write quorums R and W that each request chooses. It explains why R plus W greater than N gives a read that overlaps the latest write.}
+
+\subsubsection{Versioning and Conflict Resolution}
+\plan{This subsection describes vector clocks for registers and PN-counter CRDTs for counters, and how each one merges concurrent updates without losing data.}
+
+\subsubsection{Failure Handling}
+\plan{This subsection describes the sloppy quorum, hinted handoff, read repair, anti-entropy and failure detection. It also describes the fault injection endpoint that the demonstration uses to cut a node off.}
+
+\subsubsection{Application in the Bank and Its Boundaries}
+\plan{This subsection lists the keyspaces that the bank stores in DynaStore with their writers and consistency levels. It then explains why balances are kept in PostgreSQL instead, because concurrent debits accepted by two coordinators would amount to a double spend. It closes with the degraded behaviour when DynaStore is unreachable.}
+
+\subsubsection{Observed Behaviour}
+\plan{This subsection reports what the team observed during the load test and the partition demonstration. Hints accumulated while nodes were overloaded and drained once the load stopped, which shows the store recovering without intervention.}
+
+\screenshotplaceholder{dynastore-ui}{DynaStore status page showing ring ownership, key counts and pending hints.}{The status page during or after the load test.}{4.5cm}
+
+\subsection{Stream Processing on Dataproc}
+\label{sec:streaming}
+
+\subsubsection{Job Design}
+\plan{This subsection describes the Flink SQL job that reads the transaction topic with event-time watermarks. It lists the tumbling and hopping windows in a table together with the outputs and the topics they feed. It states that the per-minute window counts unique customers.}
+
+\mermaidplaceholder{flink-pipeline}{Stream processing pipeline from the transaction topic to the results and signal topics.}{The txn-events topic feeds the Flink job on Dataproc. Windowed aggregations write to analytics-results and risk-signals, Fraud Alert consumes the signals, and checkpoints go to Cloud Storage.}{5.5cm}
+
+
+\subsubsection{Deployment on Dataproc}
+\plan{This subsection describes the single-node Dataproc cluster, the YARN session and the connection to Kafka inside the VPC. It records the engineering problems that the team solved, which were the discovery of the Kafka nodes, the default parallelism, a missing library of the Kafka connector, and the stalling of event-time windows when input stops.}
+
+\subsubsection{Results}
+\plan{This subsection reports the output of the job for a simulated mule ring and shows the resulting fraud case.}
+
+\screenshotplaceholder{flink-results}{Window statistics and fraud signals produced by the stream processing job.}{The analytics-results and risk-signals output, the Stream analytics table and the open fraud cases.}{5cm}
+
+
+% =====================================================================  8
+\section{Quality Attributes and Evaluation}
+\label{sec:quality}
+\plan{This section evaluates the system against the qualities that a bank needs, which are scalability, resilience, observability and security.}
+\subsection{Scalability and Load Testing}
+\label{sec:scalability}
+
+\subsubsection{Autoscaling Configuration}
+\plan{This subsection lists the Horizontal Pod Autoscalers with their targets and replica limits in a table. It explains why the replica limits of the database services follow the connection budget of Cloud SQL.}
+
+\subsubsection{Load Test Methodology}
+\plan{This subsection describes the k6 test, its two scenarios for reads and payments, its ramp profile and its pass criteria for error rate and latency.}
+
+\subsubsection{Results and Analysis}
+\plan{This subsection reports the three load test runs in a table and analyses each one. The first run exposed a deadlock in the database connection handling, which the team diagnosed from logs and fixed. The second run showed that node CPU had become the limit. The third run, on three nodes, met both criteria. Grafana figures show the request rate, the error rate and the autoscaling of the services.}
+
+\begin{table}[H]\centering\small
+\caption{Results of the three load test runs.}\label{tab:loadtest}
+\begin{tabular}{@{}lllll@{}}
+\toprule
+Run & Configuration & Failed requests & p95 latency & Payments completed \\
+\midrule
+1 & Before the connection fix, 2 nodes & 63.7\% & 20.0 s & 487 \\
+2 & After the fix, 2 nodes & 4.2\% & 11.7 s & 3,973 \\
+3 & After the fix, 3 nodes & 0.01\% & 1.4 s & 4,529 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\screenshotplaceholder{grafana-loadtest}{Grafana dashboard during the final load test.}{Requests per second by service, errors, latency and HPA replicas during run 3.}{6cm}
+
+
+
+\subsection{Resilience}
+\label{sec:resilience}
+\plan{This subsection describes the liveness and readiness probes, the idempotency keys on every write path, the retries, the disruption budget of the edge, the tolerance of Spot node loss, and the retrying end-of-day batch.}
+\subsection{Observability}
+\label{sec:observability}
+
+\subsubsection{Metrics and Dashboards}
+\plan{This subsection describes the metrics that every service exposes, the Prometheus deployment, and the panels of the Grafana dashboard for service health, cluster health and domain behaviour.}
+
+\subsubsection{Centralised Logging}
+\plan{This subsection describes the structured JSON logs, their collection by Cloud Logging from GKE and from the Dataproc job, and an example of how the team used them to locate the connection deadlock.}
+
+\screenshotplaceholder{cloud-logging}{Cloud Logging view of the service logs.}{A Logs Explorer query across the bank namespace.}{4.5cm}
+
+\subsection{Security}
+\label{sec:security}
+\plan{This section describes authentication with sessions, two PINs and new-device codes, the authorisation model for customers and staff, the handling of secrets, the network controls, the protection of personal data, and the tamper-evident audit log.}
+
+
+% =====================================================================  9
+\section{Design Rationale}
+\label{sec:rationale}
+\plan{This section collects the main design decisions in one place, which a design document must justify. Each decision states the choice, the alternatives considered and the reason for the choice. The decisions cover the cloud provider, GKE with Spot nodes, Kafka inside the cluster, the split between PostgreSQL and DynaStore, gRPC on the hot path, the outbox pattern, the Cloud Function for notifications, Flink SQL on Dataproc, Terraform layering, pull-request releases with ArgoCD, and the edge with Traefik.}
+
+\begin{longtable}{@{}p{3.2cm}p{4.3cm}p{6.6cm}@{}}
+\caption{Principal design decisions, the alternatives considered and the reasons for each choice.}\label{tab:rationale}\\
+\toprule
+Decision & Alternatives considered & Reason \\
+\midrule\endhead
+Google Cloud Platform & & \\
+GKE zonal cluster on Spot nodes & & \\
+Kafka on Strimzi inside GKE & & \\
+Balances in PostgreSQL, counters in DynaStore & & \\
+gRPC for hot-path calls & & \\
+Transactional outbox & & \\
+Cloud Function for notifications & & \\
+Flink SQL on Dataproc & & \\
+Three Terraform layers & & \\
+Release by deploy pull request & & \\
+Traefik behind a Google load balancer & & \\
+\bottomrule
+\end{longtable}
+
+
+% =====================================================================  10
+\section{Conclusion and Future Work}
+\label{sec:conclusion}
+
+\subsection{Limitations and Future Work}
+\label{sec:limitations}
+\plan{This subsection states the known limitations, such as the single zonal database, the simulated RCS channel, the dependence of the Flink job on node addresses, the uneven balancing of long-lived gRPC connections, and the hand-tuned risk weights. It suggests a concrete improvement for each.}
+
+\subsection{Conclusion}
+\plan{This subsection restates the problem, the architecture and the evidence that the system meets each requirement, in two short paragraphs.}
+
+% =====================================================================  references
+\begin{thebibliography}{9}
+\bibitem{dynamo} G. DeCandia, D. Hastorun, M. Jampani, et al. Dynamo: Amazon's highly available key-value store. In \emph{Proceedings of the 21st ACM Symposium on Operating Systems Principles}, 2007.
+\bibitem{ddia} M. Kleppmann. \emph{Designing Data-Intensive Applications}. O'Reilly Media, 2017.
+\bibitem{crdt} M. Shapiro, N. Pregui\c{c}a, C. Baquero, and M. Zawirski. Conflict-free replicated data types. In \emph{Stabilization, Safety, and Security of Distributed Systems}, 2011.
+\bibitem{flink} P. Carbone, A. Katsifodimos, S. Ewen, et al. Apache Flink: Stream and batch processing in a single engine. \emph{IEEE Data Engineering Bulletin}, 38(4), 2015.
+\bibitem{outbox} C. Richardson. \emph{Microservices Patterns}. Manning Publications, 2018.
+\bibitem{k8s} The Kubernetes Authors. Horizontal Pod Autoscaling. Kubernetes documentation, 2026.
+\bibitem{argocd} Argo Project. Argo CD declarative GitOps continuous delivery. Project documentation, 2026.
+\end{thebibliography}
+
+% =====================================================================  appendices
+\appendix
+
+\section{Repository Structure}
+\plan{This appendix gives the top-level layout of the repository with one sentence for each directory.}
+
+\section{Deployment Procedure}
+\plan{This appendix lists the commands that bring the environment up and down and the order in which to run them.}
+
+\section{Task Division}
+\plan{This appendix reproduces the content of task\_division.txt with the ID number, name, requirements and services of each member.}
+
+\end{document}

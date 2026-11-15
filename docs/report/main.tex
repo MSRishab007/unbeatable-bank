@@ -50,7 +50,9 @@
 % Placeholder for a screenshot.
 \newcommand{\screenshotplaceholder}[4]{%
   \begin{figure}[H]\centering
-  \fcolorbox{gray}{white}{\parbox[c][#4][c]{0.9\linewidth}{\centering\small\textit{Screenshot to be inserted.}\\[4pt]#3\\[4pt]\texttt{figures/#1.png}}}
+  \IfFileExists{figures/#1.png}%
+    {\includegraphics[width=\linewidth,height=1.6\dimexpr#4\relax,keepaspectratio]{figures/#1.png}}%
+    {\fcolorbox{gray}{white}{\parbox[c][#4][c]{0.9\linewidth}{\centering\small\textit{Screenshot to be inserted.}\\[4pt]#3\\[4pt]\texttt{figures/#1.png}}}}
   \caption{#2}\label{fig:#1}
   \end{figure}}
 
@@ -96,14 +98,17 @@ Live deployment: \liveurl\par}
 \end{titlepage}
 
 % =====================================================================  abstract
-\begin{abstract}
+\pagenumbering{roman}
+\section*{Abstract}
+\vspace{0.3cm}
 \noindent Payment systems must admit legitimate transactions within milliseconds while they detect fraud that only emerges across many transactions. This document presents the design of \project{}, a cloud-native retail banking platform for transaction admission and fraud monitoring. The platform consists of twelve microservices on Google Cloud. A managed Kubernetes cluster hosts the stateless services, a serverless function delivers notifications, and a Flink job on Dataproc analyses the transaction stream. The services communicate through REST, gRPC, Kafka and Pub/Sub. The design separates two kinds of data. Balances and journal entries need strong consistency, so they live in PostgreSQL behind a single Ledger service. Rate-limit counters and risk features need high availability, so they live in DynaStore, a leaderless key-value store that implements the techniques of Amazon's Dynamo. Each payment passes five layers of defence. These are admission control, authorisation and policy, real-time risk scoring with 21 weighted rules, stream pattern detection, and case management. Terraform provisions all infrastructure, and ArgoCD deploys every release from a Git repository. In a sustained load test, the platform scaled out automatically, failed 0.01\% of requests and answered 95\% of requests within 1.4 seconds. A fraud simulator showed that the layers stopped all seven attack scenarios without disturbing an ordinary customer.
-\end{abstract}
+\clearpage
 
 \tableofcontents
 \newpage
 
 % =====================================================================  1
+\pagenumbering{arabic}
 \section{Introduction}
 \label{sec:introduction}
 

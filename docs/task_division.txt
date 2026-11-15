@@ -1,24 +1,24 @@
 Unbeatable Bank - CS/SS G527 Cloud Computing - Task Division
 Scenario: Banking Transaction Monitoring. Concept: Leaderless replication / Dynamo-like storage.
 
-Fill in the ID numbers and names. Each member owns two requirement tasks (a-h) and three services.
+Each member owns two requirement tasks (a-h) and three services.
 
-ID No.          Name            Tasks (a-h)                           Services
--------------   -------------   -----------------------------------   ---------------------------------------------
-                                (a) Infrastructure as Code            Identity & Auth
-                                (d) GitOps (ArgoCD)                   Account
-                                                                      Ledger
+ID No.          Name                Tasks (a-h)                           Services
+-------------   -----------------   -----------------------------------   ---------------------------------------------
+2025H1030064    Ashish Shetty       (a) Infrastructure as Code            Identity & Auth
+                                    (d) GitOps (ArgoCD)                   Account
+                                                                          Ledger
 
-                                (b) Serverless function + REST/gRPC/  API Gateway
-                                    message queues                    Transaction Intake
-                                (c) GKE, HPA and load testing         Notification Service (Cloud Function)
+2025H1030066    S Rishab            (b) Serverless function + REST/gRPC/  API Gateway
+                                        message queues                    Transaction Intake
+                                    (c) GKE, HPA and load testing         Notification Service (Cloud Function)
 
-                                (f) Concept: Dynamo-like store        DynaStore
-                                (g) Storage products                  Rate Limit Coordinator
-                                                                      Risk Detection
+2025H1030060    Jenil Gandhi        (f) Concept: Dynamo-like store        DynaStore
+                                    (g) Storage products                  Rate Limit Coordinator
+                                                                          Risk Detection
 
-                                (e) Flink stream processing           Audit Analytics (Flink on Dataproc)
-                                (h) Observability                     Fraud Alert (alerts, cases)
+2025H1030049    Manmay Maheshwari   (e) Flink stream processing           Audit Analytics (Flink on Dataproc)
+                                    (h) Observability                     Fraud Alert (alerts, cases)
                                                                       Deposits & End-of-day
 
 Where each task lives in the repository:

@@ -890,18 +890,43 @@ The same SQL also runs in the continuous integration pipeline. A test starts a l
 % =====================================================================  8
 \section{Quality Attributes and Evaluation}
 \label{sec:quality}
-\plan{This section evaluates the system against the qualities that a bank needs, which are scalability, resilience, observability and security.}
+
+A bank must keep serving customers as load grows and survive the failure of its parts. It must also show its operators what is happening and protect money and personal data. This section evaluates \project{} against these four qualities, which are scalability, resilience, observability and security.
+
 \subsection{Scalability and Load Testing}
 \label{sec:scalability}
 
 \subsubsection{Autoscaling Configuration}
-\plan{This subsection lists the Horizontal Pod Autoscalers with their targets and replica limits in a table. It explains why the replica limits of the database services follow the connection budget of Cloud SQL.}
+
+The services keep no state in memory between requests. All shared state lives in PostgreSQL, DynaStore, Firestore or Kafka, so any replica of a service can serve any request. This property allows the system to scale a service by adding pods. A Horizontal Pod Autoscaler (HPA) is a Kubernetes controller that adjusts the number of pods of a deployment to match a target metric~\cite{k8s}. \Cref{tab:hpa} lists the six HPAs of the bank. Each one targets an average CPU use of 60 percent of the CPU that the pods request.
+
+\begin{table}[H]\centering\small
+\caption{Horizontal Pod Autoscalers and their replica limits.}\label{tab:hpa}
+\begin{tabularx}{\linewidth}{@{}L{3.6cm}L{1.6cm}Y@{}}
+\toprule
+Service & Replicas & Reason for the limit \\
+\midrule
+API Gateway & 1 to 6 & Handles every request and holds no database connection \\
+Transaction Intake & 1 to 6 & Handles every payment \\
+Risk Detection & 1 to 5 & Scores every payment and holds no database connection \\
+Identity and Authentication & 1 to 4 & Checks the session of every request and the PIN of every payment \\
+Account & 1 to 3 & Serves most reads and is limited by database connections \\
+Ledger & 1 to 2 & Posts every payment and is limited by database connections \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The upper limits of the database services follow from the connection budget of Cloud SQL. The database tier of the bank accepts about 100 connections. Each pod of a database service opens at most four connections for requests and one for its outbox relay. With every HPA at its upper limit, the total stays below the budget, so a scale-out can never exhaust the connections of the database. The HPAs add at most two pods every 30 seconds and wait two minutes before they remove pods. A short dip in load therefore does not remove pods that the next burst would need.
 
 \subsubsection{Load Test Methodology}
-\plan{This subsection describes the k6 test, its two scenarios for reads and payments, its ramp profile and its pass criteria for error rate and latency.}
+
+The team generated load with k6, an open-source load testing tool that runs scripted virtual users. The test first creates 150 customers, each with a funded account and a payment PIN. It then runs two scenarios at the same time. The payment scenario sends real payments through the gateway, Intake, the Rate Limit Coordinator, Risk Detection and the Ledger. Its peak rate of ten payments per second keeps each customer below the rate limits and the velocity rules. The test therefore measures capacity and not the fraud controls. The browsing scenario reads accounts, balances and payment histories at a peak of 120 requests per second.
+
+Both scenarios ramp up for two minutes, hold their peak for six minutes and ramp down for one minute. The test passes when fewer than 2 percent of requests fail and 95 percent of requests complete within 1.5 seconds. A declined payment counts as a correct answer and not as a failure. The team watched the HPAs, the pods and the Grafana dashboard while each test ran.
 
 \subsubsection{Results and Analysis}
-\plan{This subsection reports the three load test runs in a table and analyses each one. The first run exposed a deadlock in the database connection handling, which the team diagnosed from logs and fixed. The second run showed that node CPU had become the limit. The third run, on three nodes, met both criteria. Grafana figures show the request rate, the error rate and the autoscaling of the services.}
+
+\Cref{tab:loadtest} reports the three runs on the cloud deployment. The first two runs failed the criteria, and each failure led to a change in the system.
 
 \begin{table}[H]\centering\small
 \caption{Results of the three load test runs.}\label{tab:loadtest}
@@ -916,35 +941,76 @@ Run & Configuration & Failed requests & p95 latency & Payments completed \\
 \end{tabular}
 \end{table}
 
+\paragraph{First run.} Nearly two thirds of the requests failed. The logs of the Identity service showed requests that waited 30 seconds for a database connection. At the same time, its pods used about 3 percent CPU. The pods then failed their health checks and restarted in a loop. The team traced the cause to the way the services borrowed database connections. FastAPI runs blocking code on a pool of 40 worker threads. When more requests arrived than the pool had connections, the waiting requests occupied every worker thread. The requests that already held a connection then had no thread left to finish their work and return it. The services were therefore deadlocked until the timeout of the pool released them with errors.
+
+The team changed the shared library so that a request first waits for a free connection slot without occupying a thread. It takes a worker thread only once a connection is available. A request that waits more than ten seconds receives an error at once instead of hanging. The team also changed the readiness check, which had queued behind real requests and removed busy but healthy pods from service. The check now confirms that the connection pool is open without waiting for a connection. A unit test reproduces the deadlock and guards the fix.
+
+\paragraph{Second run.} The failure rate fell to 4.2 percent and the number of completed payments rose eightfold. The latency remained high, however. The dashboard showed both nodes close to full CPU use. The HPAs had asked for more pods, but the two nodes had no CPU left to run them. DynaStore also slowed down at this point, which explains the hints that \cref{sec:concept} reports. The limit had moved from the software to the size of the cluster.
+
+\paragraph{Third run.} The team repeated the test on three nodes, which a single parameter of the start command selects. The run met both criteria with a failure rate of 0.01 percent and a 95th percentile latency of 1.4 seconds. During the peak, the gateway, Intake and Risk Detection scaled out to several pods each. A few minutes after the test ended, the HPAs returned them to a single pod. \Cref{fig:grafana-loadtest} shows the request rate, the latency and the replica counts during this run.
+
 \screenshotplaceholder{grafana-loadtest}{Grafana dashboard during the final load test.}{Requests per second by service, errors, latency and HPA replicas during run 3.}{6cm}
-
-
 
 \subsection{Resilience}
 \label{sec:resilience}
-\plan{This subsection describes the liveness and readiness probes, the idempotency keys on every write path, the retries, the disruption budget of the edge, the tolerance of Spot node loss, and the retrying end-of-day batch.}
+
+The design assumes that pods, nodes and dependencies fail, and it limits the effect of each failure.
+
+\paragraph{Health probes.} Every service exposes two health endpoints. The liveness probe calls \code{/healthz}, which never touches a dependency. A database outage therefore does not cause Kubernetes to restart every pod. The readiness probe calls \code{/readyz}, which checks the dependencies of the service. A pod that fails it stops receiving traffic but keeps running until it recovers.
+
+\paragraph{Safe retries.} Every operation that changes money carries an idempotency key. An idempotency key is a unique identifier that the client attaches to a request. The service records it with the result, and a repeated request with the same key returns the recorded result without repeating the work. The gateway, Intake, the Ledger, the Deposits service and the end-of-day batch all apply such keys. Clients and services can therefore retry after a timeout without paying twice. Kafka consumers apply the same idea, as \cref{sec:outbox} describes.
+
+\paragraph{Loss of Spot nodes.} Google may reclaim a Spot node at short notice. Kubernetes then reschedules the pods of that node on the remaining nodes. The stateless services lose nothing. The StatefulSets of DynaStore and Kafka keep their data on persistent disks, which reattach to the new pods. During the move, DynaStore continues to serve requests through its other two replicas and hinted handoff. The edge runs between two and four Traefik pods with a disruption budget. The budget keeps at least one pod running during voluntary changes such as node upgrades.
+
+\paragraph{Graceful degradation.} When DynaStore is unreachable, admission and risk scoring degrade by amount, as \cref{sec:concept} describes. When the risk engine itself does not answer, Intake completes payments below Rs 20,000 and holds larger ones for review. When Kafka is unreachable, the outbox keeps events in the database until the broker returns. A failure of the notification channel delays the message but not the payment, because Pub/Sub retries the function until it succeeds.
+
+\paragraph{Retrying batch work.} The end-of-day batch runs as a Kubernetes CronJob. If the Deposits service is unreachable, for example because its pod is restarting, the job retries up to 20 times with 30 seconds between attempts. Each run is idempotent for its business date, so a repeated run never accrues interest twice.
+
 \subsection{Observability}
 \label{sec:observability}
 
+Observability is the ability to understand the internal state of a system from its outputs. \project{} provides it through metrics, dashboards and centralised logs.
+
 \subsubsection{Metrics and Dashboards}
-\plan{This subsection describes the metrics that every service exposes, the Prometheus deployment, and the panels of the Grafana dashboard for service health, cluster health and domain behaviour.}
+
+Every service exposes metrics in the Prometheus format at \code{/metrics}. The shared library records the rate, errors and latency of every HTTP and gRPC endpoint. Each service adds counters for its own domain. Intake counts payment outcomes, and the Rate Limit Coordinator counts its decisions. Risk Detection counts decisions and rule hits, and Fraud Alert counts alerts, cases and automatic freezes. DynaStore reports the time to reach a quorum, the pending hints, the liveness of each peer, the number of keys and the repair events.
+
+ArgoCD installs Prometheus and Grafana from the community chart. Prometheus scrapes every pod that carries the scrape annotation every 15 seconds and keeps the data for two days. ArgoCD also deploys one Grafana dashboard from the repository, organised in four rows. The first row shows the health of the services, with request rate, error rate and latency per service. The second row shows autoscaling and the health of the cluster, with HPA replicas, CPU and memory by pod and node, and pod restarts. The third row shows payments, rate limiting and fraud, with decisions, decline reasons, rules that fire, and alerts and cases. The fourth row shows DynaStore and the event flow, with peer liveness, quorum latency, hints, repairs and the rate of outbox events. Grafana is reachable only through a port forward and never from the internet.
 
 \subsubsection{Centralised Logging}
-\plan{This subsection describes the structured JSON logs, their collection by Cloud Logging from GKE and from the Dataproc job, and an example of how the team used them to locate the connection deadlock.}
+
+Every service writes its logs to standard output as one JSON object per line. Each object carries the time, the severity, the service name, the message and any structured fields. GKE sends container logs to Cloud Logging automatically, and Dataproc does the same for the Flink job. The logs of every microservice and of the stream processing job therefore live in one place. An operator can search all of them with a single query. Cloud Logging reads the severity field, so a filter on errors works across all services. The system needs no logging stack inside the cluster.
+
+The logs proved their value during the first load test. A query across the bank namespace showed that only the database services reported connection timeouts and that their CPU use was low. This combination pointed to waiting and not to overload, and it led the team to the deadlock that \cref{sec:scalability} describes.
 
 \screenshotplaceholder{cloud-logging}{Cloud Logging view of the service logs.}{A Logs Explorer query across the bank namespace.}{4.5cm}
 
 \subsection{Security}
 \label{sec:security}
-\plan{This section describes authentication with sessions, two PINs and new-device codes, the authorisation model for customers and staff, the handling of secrets, the network controls, the protection of personal data, and the tamper-evident audit log.}
 
+\Cref{sec:fraud} describes the controls that protect payments, including the PINs, the sessions and the checks on new devices. This subsection describes the remaining measures, which protect credentials, data and the platform.
+
+\paragraph{Credentials.} The Identity service stores passwords as salted scrypt hashes, a function designed to make guessing slow. It stores one-time passwords only as hashes, and it stores the PAN of a customer only as a keyed hash. A copy of the identity database therefore reveals no usable credential.
+
+\paragraph{Authorisation.} Customers may act only on the accounts that they hold, and the gateway checks this ownership on every request. Staff members receive one of four roles, which are administrator, analyst, teller and KYC officer. Each role opens only the functions that it needs. Unfreezing an account requires a second member of staff to approve it, which is known as the maker-checker principle.
+
+\paragraph{Secrets.} Terraform generates every password and signing key and stores it in Secret Manager. The platform layer copies the secrets into a Kubernetes secret, and the pods read them as environment variables. No secret appears in the repository, which is public.
+
+\paragraph{Network controls.} Traefik behind one Google load balancer is the only component that the internet can reach. It serves HTTPS with a certificate from Let's Encrypt, redirects plain HTTP to HTTPS and sends the HSTS header. HSTS tells the browser to use HTTPS for all later visits. Traefik replaces any client address header with the real address of the caller, so a client cannot fake its address to avoid the rate limits. Inside the cluster, NetworkPolicies admit traffic to the bank services only from pods in the same namespace. Traefik may reach only the gateway, and Prometheus may reach only the metrics ports.
+
+\paragraph{Personal data.} The KYC bucket is readable only by the Identity service, and every view of a document by staff is recorded. A rejected document is deleted at once. Statements and documents reach the browser only through the gateway with headers that prevent them from running code. The web application keeps its session only in the current browser tab and builds every page from text nodes, which prevents injected script.
+
+\paragraph{Tamper-evident history.} The Account service records the history of each account as a hash chain. Each event stores a hash of its own content together with the hash of the previous event. A change to any past event breaks every later hash, and an administrative call verifies the chain on demand.
+
+\paragraph{Container hardening.} Every container runs as a non-root user with no added Linux capabilities, no privilege escalation and the default seccomp profile. Seccomp is a Linux feature that restricts the system calls that a process may make.
 
 % =====================================================================  9
 \section{Design Rationale}
 \label{sec:rationale}
-\plan{This section collects the main design decisions in one place, which a design document must justify. Each decision states the choice, the alternatives considered and the reason for the choice. The decisions cover the cloud provider, GKE with Spot nodes, Kafka inside the cluster, the split between PostgreSQL and DynaStore, gRPC on the hot path, the outbox pattern, the Cloud Function for notifications, Flink SQL on Dataproc, Terraform layering, pull-request releases with ArgoCD, and the edge with Traefik.}
 
-\begin{longtable}{@{}L{3.2cm}L{4.3cm}L{6.6cm}@{}}
+The earlier sections explain each design decision where it arises. \Cref{tab:rationale} collects the principal decisions in one place. For each decision, it names the alternatives that the team considered and the reason for the choice. Three concerns recur across the reasons. The first is that each kind of data receives the consistency it needs. The second is that every change to the system passes through Git and review. The third is that the running cost stays within the available credit.
+
+\begin{longtable}{@{}L{3.2cm}L{3.6cm}L{7.3cm}@{}}
 \caption{Principal design decisions, the alternatives considered and the reasons for each choice.}\label{tab:rationale}\\
 \toprule
 Decision & Alternatives considered & Reason \\
@@ -952,17 +1018,20 @@ Decision & Alternatives considered & Reason \\
 \toprule
 Decision & Alternatives considered & Reason \\
 \midrule\endhead
-Google Cloud Platform & & \\
-GKE zonal cluster on Spot nodes & & \\
-Kafka on Strimzi inside GKE & & \\
-Balances in PostgreSQL, counters in DynaStore & & \\
-gRPC for hot-path calls & & \\
-Transactional outbox & & \\
-Cloud Function for notifications & & \\
-Flink SQL on Dataproc & & \\
-Three Terraform layers & & \\
-Release by deploy pull request & & \\
-Traefik behind a Google load balancer & & \\
+Google Cloud Platform & Amazon Web Services, Microsoft Azure & One provider offers every required product, including Flink on Dataproc. GKE charges no management fee for one zonal cluster, and the team had credit on this provider. \\ \addlinespace[3pt]
+GKE zonal cluster on Spot nodes & Regional cluster, regular nodes, Cloud Run & Spot nodes cost a fraction of regular nodes, and the stateless services tolerate their loss. Kubernetes also hosts the StatefulSets of DynaStore and Kafka, which Cloud Run cannot run. \\ \addlinespace[3pt]
+Kafka on Strimzi inside GKE & Managed Kafka, Pub/Sub for all events & The managed Kafka service alone would exceed the budget. Kafka keeps an ordered log per partition and lets consumers replay it, which the Flink job and the fraud consumers rely on. \\ \addlinespace[3pt]
+Balances in PostgreSQL, counters in DynaStore & All data in one store & Balances need transactions and locks to prevent double spending. Counters need availability and fast writes, which leaderless replication provides. \\ \addlinespace[3pt]
+One Ledger service owns all balance changes & Each service updates balances & Locking, idempotency and double-entry posting are correct in one place, and no other service can change money. \\ \addlinespace[3pt]
+gRPC with client-side balancing on the payment path & REST for all calls, gRPC through a ClusterIP Service & Binary messages and persistent HTTP/2 connections reduce latency on every payment. Balancing in the client spreads calls across pods, which a single long-lived connection through a ClusterIP would not do. \\ \addlinespace[3pt]
+Transactional outbox & Publishing to Kafka inside the request & An event is published only if its transaction commits, and it is never lost when a pod stops between the commit and the publish. \\ \addlinespace[3pt]
+Cloud Function for notifications & A notification service in GKE & Notifications arrive in bursts and often not at all. A function scales to zero, and Pub/Sub retries it until delivery succeeds. \\ \addlinespace[3pt]
+Flink SQL on Dataproc & A Flink job in Java or Python, Flink on GKE & Windowed queries in SQL are short, easy to review and testable in CI. Dataproc provides a managed Flink installation that Terraform creates and deletes on demand. \\ \addlinespace[3pt]
+Cloud Logging for logs & Loki or Elasticsearch in the cluster & It collects logs from GKE and Dataproc in one place without any component to operate, and it is free at this volume. \\ \addlinespace[3pt]
+Three Terraform layers & One Terraform configuration & The bootstrap layer changes rarely and holds the state bucket. The platform layer depends on a running cluster. Separate layers keep each plan small and each failure local. \\ \addlinespace[3pt]
+Rendered manifests and release by deploy pull request & Helm templates, direct deployment from CI & A pull request shows the exact change to Kubernetes, and merging it is the release. ArgoCD applies only what is on the main branch, so a rollback is a revert. \\ \addlinespace[3pt]
+Rules and limits in Git & An administrative interface that writes to a database & Changes to risk rules and rate limits are reviewed, versioned and reversible like code, and the services reload them without a restart. \\ \addlinespace[3pt]
+Traefik behind one Google load balancer & GKE Ingress with a Google HTTP load balancer & One regional network load balancer costs less, and Traefik with cert-manager provides HTTPS, redirects and security headers inside the cluster. \\ \addlinespace[3pt]
 \bottomrule
 \end{longtable}
 
@@ -973,10 +1042,32 @@ Traefik behind a Google load balancer & & \\
 
 \subsection{Limitations and Future Work}
 \label{sec:limitations}
-\plan{This subsection states the known limitations, such as the single zonal database, the simulated RCS channel, the dependence of the Flink job on node addresses, the uneven balancing of long-lived gRPC connections, and the hand-tuned risk weights. It suggests a concrete improvement for each.}
+
+The current deployment makes several deliberate compromises, most of them to control cost. \Cref{tab:limitations} lists each known limitation together with an improvement that would remove it.
+
+\begin{table}[H]\centering\small
+\caption{Known limitations and the improvement proposed for each.}\label{tab:limitations}
+\begin{tabularx}{\linewidth}{@{}YY@{}}
+\toprule
+Limitation & Proposed improvement \\
+\midrule
+The cluster, the database and Kafka run in one zone. Cloud SQL has no standby and no automated backups, and Kafka has one broker with a replication factor of one. & Use a regional cluster, enable high availability and backups on Cloud SQL, and run three Kafka brokers with a replication factor of three. Each change is one Terraform variable or one manifest value. \\ \addlinespace[3pt]
+The membership of DynaStore is static. Adding a node requires a rolling restart, after which anti-entropy moves the data. & Add a gossip protocol for membership so that nodes can join and leave at run time. \\ \addlinespace[3pt]
+The Flink job reaches Kafka through the addresses of the GKE nodes, which it reads at start-up. A change of nodes while the job runs breaks its connection. & Expose Kafka through an internal load balancer with a stable address, or run the job on GKE with the Flink Kubernetes operator. \\ \addlinespace[3pt]
+gRPC clients open their connections when they start. A pod that an HPA adds receives traffic only after the clients resolve the service name again. & Limit the age of each connection on the server, or place a service mesh with per-request balancing in front of the gRPC services. \\ \addlinespace[3pt]
+The risk weights and thresholds are set by hand. & Train a model on labelled cases from Fraud Alert and use its score as one more weighted rule, first in shadow mode. \\ \addlinespace[3pt]
+Plain SMS is not sent, and RCS is simulated until a test agent is registered. & Register a sender with an SMS provider and replace the simulated RCS adapter. \\ \addlinespace[3pt]
+Services trust each other on the basis of network isolation. & Add mutual TLS between services through a service mesh. \\ \addlinespace[3pt]
+Uploaded KYC files are checked for type and size but not for malware. & Scan each upload before the review queue receives it. \\ \addlinespace[3pt]
+\bottomrule
+\end{tabularx}
+\end{table}
 
 \subsection{Conclusion}
-\plan{This subsection restates the problem, the architecture and the evidence that the system meets each requirement, in two short paragraphs.}
+
+This document presented the design of \project{}, a banking platform that admits transactions and monitors them for fraud on Google Cloud. Twelve microservices on GKE divide the work of the bank. They communicate through REST, gRPC, Kafka and Pub/Sub, and a serverless function delivers notifications. Terraform creates every cloud resource, and ArgoCD deploys every workload from Git. A payment passes five layers of defence, which are rate limiting, identity controls, real-time risk scoring, stream pattern detection and case management. DynaStore, a Dynamo-style store built for this project, keeps the counters and features of these layers available through node failures. The money itself stays in PostgreSQL under strict transactions.
+
+The evaluation supports the design. Under sustained load, the HPAs scaled the busiest services out and back. The final load test met its criteria with 0.01 percent failed requests and a 95th percentile latency of 1.4 seconds. The first two load tests exposed a deadlock and a capacity limit, and the metrics and logs led the team to both causes. The fraud simulator showed that every attack scenario was caught by its intended layer. The Flink job on Dataproc detected a mule ring that no single payment revealed. The limitations listed above are known, and each has a concrete path to removal.
 
 % =====================================================================  references
 \begin{thebibliography}{9}
@@ -993,12 +1084,63 @@ Traefik behind a Google load balancer & & \\
 \appendix
 
 \section{Repository Structure}
-\plan{This appendix gives the top-level layout of the repository with one sentence for each directory.}
+\label{app:repo}
+
+\Cref{tab:repo} describes the top-level directories of the repository.
+
+\begin{table}[H]\centering\small
+\caption{Top-level directories of the repository.}\label{tab:repo}
+\begin{tabularx}{\linewidth}{@{}L{3.6cm}Y@{}}
+\toprule
+Directory & Content \\
+\midrule
+\code{services/} & The microservices, one directory each, including DynaStore and the Flink job \code{audit-analytics} \\
+\code{functions/} & The serverless Notification Service \\
+\code{libs/common/} & The shared library for authentication, metrics, logging, the outbox, Kafka, Pub/Sub, document and object stores, and gRPC \\
+\code{proto/} & The gRPC contracts \\
+\code{infra/} & The Terraform layers \code{bootstrap}, \code{main} and \code{platform}, and a local development database \\
+\code{deploy/} & What ArgoCD deploys, namely the bank services, Kafka, the edge, monitoring and the ArgoCD applications \\
+\code{web/} & The source of the customer web application \\
+\code{loadtest/} & The k6 load test and the fraud simulator \\
+\code{scripts/} & The smoke test, the browser test, the local stack and the manifest generator \\
+\code{docs/} & This document, the deployment guide and the task division \\
+\code{.github/workflows/} & The continuous integration and release pipelines \\
+\bottomrule
+\end{tabularx}
+\end{table}
 
 \section{Deployment Procedure}
-\plan{This appendix lists the commands that bring the environment up and down and the order in which to run them.}
+\label{app:deploy}
+
+The deployment guide in the repository gives the full procedure. In outline, an operator performs the following steps.
+
+\begin{enumerate}
+\item Copy the example variable file in \code{infra/bootstrap} and apply the bootstrap layer once. It creates the project, the state bucket, the budgets and the identity federation for GitHub.
+\item Copy the example variable file in \code{infra/main} and run \code{make up}. The command applies the main and platform layers, and ArgoCD then deploys every workload from Git. The command \code{make up NODES=3} starts three nodes for a load test.
+\item Set the project variables of the repository and run the release workflow once. Merging the deploy pull request that it opens releases the images.
+\item Check the deployment with \code{make status}, \code{make url} and \code{make smoke}.
+\item Run \code{make flink-up} to start the Flink job on Dataproc and \code{make flink-down} to remove it.
+\item Run \code{make loadtest} and \code{make simulate} for the load test and the fraud simulator.
+\item Run \code{make down} to stop every resource that costs money while keeping the data.
+\end{enumerate}
 
 \section{Task Division}
-\plan{This appendix reproduces the content of task\_division.txt with the ID number, name, requirements and services of each member.}
+\label{app:tasks}
+
+Each member owns two of the requirement areas and three services. \Cref{tab:tasks} reproduces the content of \code{task\_division.txt}.
+
+\begin{table}[H]\centering\small
+\caption{Division of tasks among the team members.}\label{tab:tasks}
+\begin{tabularx}{\linewidth}{@{}L{2.9cm}L{1.9cm}YY@{}}
+\toprule
+ID number & Name & Requirement areas & Services \\
+\midrule
+20XXXXXXXXXX & Member 1 & Infrastructure as code, GitOps with ArgoCD & Identity and Authentication, Account, Ledger \\
+20XXXXXXXXXX & Member 2 & Serverless function and communication, GKE with autoscaling and load testing & API Gateway, Transaction Intake, Notification Service \\
+20XXXXXXXXXX & Member 3 & Leaderless replication concept, storage products & DynaStore, Rate Limit Coordinator, Risk Detection \\
+20XXXXXXXXXX & Member 4 & Stream processing with Flink, observability & Audit Analytics, Fraud Alert, Deposits \\
+\bottomrule
+\end{tabularx}
+\end{table}
 
 \end{document}

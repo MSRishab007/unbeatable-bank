@@ -645,6 +645,9 @@ The Risk Detection service scores every payment that passes admission and author
 \caption{Rules of the real-time risk engine and their weights.}\label{tab:rules}\\
 \toprule
 Rule & Weight & Condition \\
+\midrule\endfirsthead
+\toprule
+Rule & Weight & Condition \\
 \midrule\endhead
 \code{DENY\_LIST} & 100 & The payee or the device received confirmed fraud in the last 30 days. \\
 \code{VELOCITY\_1M} & 35 & More than 5 payment attempts from the customer in one minute. \\
@@ -745,71 +748,144 @@ The evaluation has two limits. First, the team chose the rule weights and thresh
 % =====================================================================  7
 \section{Data Architecture}
 \label{sec:data}
-\plan{This section describes the three kinds of data in the system and the store chosen for each. It covers the storage products, the leaderless store that implements the assigned concept, and the stream processing job that turns the event stream into statistics and signals.}
+
+\project{} handles three kinds of data, and it keeps each kind in a store that suits it. Money and customer records need strong consistency and transactions. Admission counters and risk features need high availability and fast writes. The transaction stream needs durable, ordered delivery and analysis over time. This section first describes the storage products and the data that each one holds. It then describes DynaStore, which implements the leaderless replication concept of the scenario. It closes with the stream processing job that analyses the transaction stream.
+
 \subsection{Storage Products and Data Ownership}
 \label{sec:storage}
-\plan{This section describes each storage product, the data it holds and the reason for the choice. It covers Cloud SQL for PostgreSQL, Firestore, Cloud Storage, DynaStore and Kafka. It also explains how schema migrations follow Git through the pre-sync job, and how KYC documents and statements are stored and protected.}
+
+\Cref{tab:storage} lists the five stores, the data that each one holds and the reason for each choice. Three of them are managed Google Cloud products, namely Cloud SQL, Firestore and Cloud Storage. DynaStore and Kafka run inside the GKE cluster.
 
 \begin{table}[H]\centering\small
 \caption{Storage products, the data each one holds, and the reason for the choice.}\label{tab:storage}
-\begin{tabularx}{\linewidth}{@{}L{3cm}YY@{}}
+\begin{tabularx}{\linewidth}{@{}L{2.6cm}YY@{}}
 \toprule
 Product & Data held & Reason for the choice \\
 \midrule
-Cloud SQL (PostgreSQL) & & \\
-Firestore & & \\
-Cloud Storage & & \\
-DynaStore & & \\
-Kafka & & \\
+Cloud SQL for PostgreSQL & Customers, accounts, ledger journals and balances, payments, deposits, credentials, KYC records and fraud cases & Relational data that needs ACID transactions, foreign keys and check constraints \\
+Firestore & Sessions, login events, alerts, the notification inbox, notification settings and analytics snapshots & Semi-structured records that are written often and read by key, with no need for joins \\
+Cloud Storage & KYC documents, monthly statements, end-of-day reports, Flink job files and checkpoints, function source and Terraform state & Files that are written once and read whole \\
+DynaStore & Rate-limit counters, risk features, fraud signals and the deny list & Small values written on every request, where availability matters more than strict consistency \\
+Kafka & Transaction, sign-in, ledger and account events, fraud signals and analytics results & An ordered and replayable event log that several consumers read independently \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
+\paragraph{Cloud SQL.} A single PostgreSQL 16 instance holds three databases. The \code{core\_banking} database contains separate schemas for the Ledger, Account, Transaction Intake and Deposits services. The \code{identity} database belongs to the Identity service, and the \code{cases} database belongs to the Fraud Alert service. Each service connects as its own database user and may access only its own schema. PostgreSQL provides the guarantees that money requires. A payment debits and credits balances in one transaction, and constraints reject any state that breaks the rules of the bank. Each service manages its schema through Alembic migrations, which are versioned scripts that change the schema step by step. ArgoCD runs the migrations of each service as a pre-sync job before it starts new pods. The schema therefore always matches the code that runs against it.
+
+\paragraph{Firestore.} Firestore is a managed document database. It holds records whose structure varies and that the system reads by key or by one field. Sessions and login events are written on every sign-in and read by session identifier. The notification inbox of each customer is a collection that the Notification Service writes and the application reads. Firestore scales these writes without any capacity planning, and it needs no schema migrations.
+
+\paragraph{Cloud Storage.} Cloud Storage holds files in four buckets with separate access rules. The KYC bucket is private to the Identity service. It has no versioning and no soft-delete period, so a rejected or replaced identity document is gone at once. The reports bucket holds the monthly statements and the end-of-day reports. The system registers a SHA-256 fingerprint of each statement, which lets anyone check later that a statement file came from the bank unchanged. The other buckets hold the Flink job files and checkpoints and the source of the Cloud Function. The gateway serves stored files with headers that forbid the browser from running them. An uploaded file therefore cannot execute code in the origin of the bank.
+
 \subsection{Leaderless Replication in DynaStore}
 \label{sec:concept}
 
+DynaStore is a key-value store that applies the techniques of Amazon's Dynamo~\cite{dynamo}. The team implemented it in Python, with gRPC for both client requests and communication between replicas. It runs in the cluster as a StatefulSet of three nodes, and each node keeps its data in SQLite on its own persistent disk.
+
 \subsubsection{Motivation}
-\plan{This subsection explains why rate-limit counters and fraud features suit leaderless replication. They are written on every request, they tolerate slight staleness, and they must survive node failures.}
+
+Leaderless replication suits the data that admission control uses. The Rate Limit Coordinator and the Risk Detection service write counters and features on every payment. These writes must not wait for a single leader, and they must continue when a node fails. A count that is briefly out of date by one or two payments does no harm to these decisions. In a leader-based design, by contrast, the loss of the leader would stop all writes until a new leader is elected. DynaStore has no leader and no election, so any node can serve any request at any time.
 
 \subsubsection{Partitioning with Consistent Hashing}
-\plan{This subsection describes the hash ring with virtual nodes and the preference list of each key.}
+
+DynaStore spreads keys across nodes with consistent hashing, which \cref{fig:dynastore-ring} illustrates. The hash function maps every node and every key onto the same circular space. Each node takes 64 positions on the ring, which are called virtual nodes. The many positions spread the keys evenly and give each node a similar share of the ring. To place a key, a node hashes it and walks clockwise from that point. The first three distinct nodes that it meets form the preference list of the key, which is the set of replicas that store it. When a node joins or leaves, only the keys next to its positions move, so most keys stay where they are.
 
 \mermaidplaceholder{dynastore-ring}{Consistent hashing ring of the three DynaStore nodes and the preference list of one key.}{A ring with virtual node positions for three nodes and one key placed on it, with arrows to the first three distinct nodes clockwise.}{6cm}
 
 \subsubsection{Replication and Tunable Quorums}
-\plan{This subsection describes replication with N equal to 3, and the read and write quorums R and W that each request chooses. It explains why R plus W greater than N gives a read that overlaps the latest write.}
+
+Every key is stored on N equal to 3 nodes. A client may send a request to any node, and that node coordinates the request. For a write, the coordinator applies the change locally, sends it to the other replicas, and reports success once W replicas have acknowledged it. For a read, the coordinator asks the replicas and returns once R replicas have answered. Each request chooses its own R and W, and both default to 2. When R plus W exceeds N, every read quorum overlaps every write quorum in at least one node. The read then sees the latest acknowledged write.
+
+The bank chooses the quorums by the needs of each keyspace. Rate-limit counters and risk features use R and W equal to 1. These requests must answer quickly and must not fail when two nodes are slow, and a slightly stale count is acceptable. The background mechanisms described below bring the other replicas up to date within seconds.
 
 \subsubsection{Versioning and Conflict Resolution}
-\plan{This subsection describes vector clocks for registers and PN-counter CRDTs for counters, and how each one merges concurrent updates without losing data.}
+
+Without a leader, two coordinators may accept concurrent writes to the same key. DynaStore detects such conflicts with vector clocks. A vector clock is a set of counters, one for each node that has written the value. By comparing two clocks, a node can tell whether one version descends from the other or whether the two versions are concurrent. A newer version replaces the older one, while concurrent versions are kept side by side as siblings. A read returns a deterministic winner among the siblings, and a later write that names the versions it has seen merges them.
+
+Counters need a different approach, because two concurrent increments must both count. DynaStore stores counters as PN-counters, a type of conflict-free replicated data type (CRDT)~\cite{crdt}. A PN-counter keeps, for each node, one total of increments and one total of decrements. Each node changes only its own totals. Merging two copies takes the larger total for each node. The value of the counter is the sum of all increments minus the sum of all decrements. The merge gives the same result in any order and when repeated, so replicas that exchange their copies always converge without losing an increment. Each value may also carry an expiry time, which lets window counters and signals remove themselves.
 
 \subsubsection{Failure Handling}
-\plan{This subsection describes the sloppy quorum, hinted handoff, read repair, anti-entropy and failure detection. It also describes the fault injection endpoint that the demonstration uses to cut a node off.}
+
+DynaStore keeps working when nodes fail, through five mechanisms.
+
+\paragraph{Failure detection.} Each node sends a heartbeat to its peers every second and marks a peer as down when it stops answering. A client that meets an unresponsive node skips it for a few seconds. A hung node therefore costs a single timeout instead of one timeout per request.
+
+\paragraph{Sloppy quorum and hinted handoff.} When a replica in the preference list is down, the coordinator sends the write to the next healthy node on the ring instead. That node stores the data together with a hint that names the intended replica. Every second, it tries to deliver its hints, and it hands the data over once the replica answers again. Writes therefore keep succeeding while a node is down.
+
+\paragraph{Read repair.} When a read finds that the replicas disagree, the coordinator merges their versions and writes the merged value back to the replicas that were behind.
+
+\paragraph{Anti-entropy.} Every 15 seconds, each node compares digests of its keys with a peer. A digest is a short hash of a value. The nodes then exchange only the keys whose digests differ. This background repair also fixes keys that no client reads.
+
+\paragraph{Fault injection.} An administrative call can mark a node as down or cut it off from chosen peers. The demonstration uses it to show writes succeeding with a node cut off, hints accumulating, and the data converging after the link is restored.
 
 \subsubsection{Application in the Bank and Its Boundaries}
-\plan{This subsection lists the keyspaces that the bank stores in DynaStore with their writers and consistency levels. It then explains why balances are kept in PostgreSQL instead, because concurrent debits accepted by two coordinators would amount to a double spend. It closes with the degraded behaviour when DynaStore is unreachable.}
+
+\Cref{tab:keyspaces} lists the data that the bank keeps in DynaStore.
+
+\begin{table}[H]\centering\small
+\caption{Keyspaces stored in DynaStore.}\label{tab:keyspaces}
+\begin{tabularx}{\linewidth}{@{}L{4.0cm}L{3.4cm}Y@{}}
+\toprule
+Keyspace & Writer & Reason leaderless replication fits \\
+\midrule
+Rate-limit window counters & Rate Limit Coordinator & Written on every request and must never block admission \\
+Risk features & Risk Detection & High write rate, and a value that is milliseconds old is harmless \\
+Cross-service signals with expiry & Identity, Deposits, Fraud Alert & Best-effort hints that expire on their own \\
+Deny list & Fraud Alert & Read on every payment, and a late replica is repaired by the next read \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Balances do not live in DynaStore. Under leaderless replication, two coordinators could each accept a debit from the same account and reconcile the two afterwards. For a counter, this behaviour is correct. For a bank balance, it would allow the same money to be spent twice. The Dynamo paper accepts a similar anomaly for its shopping cart, where a deleted item may reappear, but a bank cannot accept it for money. Balances and journals therefore live in PostgreSQL, where a single transaction locks the affected balances, checks the funds and writes both sides of the journal.
+
+When DynaStore is unreachable as a whole, the system degrades by amount. The rate limiter admits payments of up to Rs 2,000 and refuses larger ones. The risk engine holds every payment of Rs 20,000 or more for review. Small payments therefore continue, while large payments receive extra scrutiny.
 
 \subsubsection{Observed Behaviour}
-\plan{This subsection reports what the team observed during the load test and the partition demonstration. Hints accumulated while nodes were overloaded and drained once the load stopped, which shows the store recovering without intervention.}
+
+The load test of \cref{sec:scalability} exercised DynaStore under stress. At the peak of the second run, the nodes held 6,517 keys on the first node alone, and 464 hints were waiting for delivery. The nodes were short of CPU at that time, so some replicas answered too slowly and the coordinators stored hints for them. Writes nevertheless kept succeeding. This observation matches the design, in which a slow replica delays its own copy of the data but does not block the request.
 
 \screenshotplaceholder{dynastore-ui}{DynaStore status page showing ring ownership, key counts and pending hints.}{The status page during or after the load test.}{4.5cm}
 
 \subsection{Stream Processing on Dataproc}
 \label{sec:streaming}
 
+The Audit Analytics service is a stateful stream processing job written in Flink SQL. It runs on Dataproc, the managed Hadoop and Spark service of Google Cloud, which also offers Flink. \Cref{fig:flink-pipeline} shows the pipeline.
+
 \subsubsection{Job Design}
-\plan{This subsection describes the Flink SQL job that reads the transaction topic with event-time watermarks. It lists the tumbling and hopping windows in a table together with the outputs and the topics they feed. It states that the per-minute window counts unique customers.}
+
+The job consists of three SQL files. The first declares the Kafka tables and the settings of the job. The second defines the windowed queries, and the third connects the queries to the output topics. The job reads the \code{txn-events} topic and uses the time of each payment as its event time. A watermark trails the latest event time by five seconds. The watermark tells Flink that no earlier events will arrive, so Flink can close a window once the watermark passes its end. A source partition that receives no events for ten seconds counts as idle and no longer holds the watermark back.
+
+\begin{table}[H]\centering\small
+\caption{Outputs of the stream processing job.}\label{tab:flink-outputs}
+\begin{tabularx}{\linewidth}{@{}L{3.6cm}L{3.0cm}Y@{}}
+\toprule
+Output & Window & Content \\
+\midrule
+Per-minute statistics & 1 minute, tumbling & Events, completed, declined, held, challenged, rate-limited and risk-blocked payments, unique customers and completed amount, written to \code{analytics-results} \\
+Fraud signals & 1 to 60 minutes, tumbling and hopping & The five signals of \cref{tab:patterns}, written to \code{risk-signals} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\Cref{tab:flink-outputs} lists the outputs. The per-minute statistics include the number of unique customers in each window, which Flink computes as a distinct count over the window. The Fraud Alert service stores these statistics, and the staff console shows them on its system page. The windows keep state, such as the open counts and the sets of distinct customers. Flink saves this state to Cloud Storage in a checkpoint every 30 seconds. After a failure, the job restores the last checkpoint and resumes reading Kafka from the offsets saved with it.
 
 \mermaidplaceholder{flink-pipeline}{Stream processing pipeline from the transaction topic to the results and signal topics.}{The txn-events topic feeds the Flink job on Dataproc. Windowed aggregations write to analytics-results and risk-signals, Fraud Alert consumes the signals, and checkpoints go to Cloud Storage.}{5.5cm}
 
-
 \subsubsection{Deployment on Dataproc}
-\plan{This subsection describes the single-node Dataproc cluster, the YARN session and the connection to Kafka inside the VPC. It records the engineering problems that the team solved, which were the discovery of the Kafka nodes, the default parallelism, a missing library of the Kafka connector, and the stalling of event-time windows when input stops.}
+
+Terraform creates a single-node Dataproc cluster on image version 2.2, which provides Flink 1.17. An initialisation script on the cluster prepares and submits the job. It finds the GKE nodes, downloads the Kafka connector, starts a Flink session on YARN and submits the SQL files. Dataproc deletes the cluster after an hour without use, which limits the cost of a forgotten cluster.
+
+The job reaches Kafka over the VPC. Strimzi exposes the brokers through node ports on the GKE nodes, and the firewall admits this traffic only from the internal address ranges. The initialisation script therefore looks up the addresses of the running GKE nodes and gives them to the job as the bootstrap servers.
+
+Running the job on Dataproc required the team to solve four problems. First, the script at first selected the GKE nodes with a filter that the Compute API rejected, so the job never started. The script now lists the machines and selects the GKE nodes itself. Second, Dataproc derives the default parallelism of Flink from the number of worker machines. On a single-node cluster this value came out as minus four, and Flink refused the job. The team set the parallelism to one in the configuration of the cluster, of the YARN session and of the SQL job. Third, the Kafka connector needed a Flink library that the Dataproc image does not include. The job failed each time it created its Kafka writer, until the script shipped the missing library with the job. Fourth, event-time windows close only when later events move the watermark forward. A test that stops sending payments therefore leaves its last window open. The fraud simulator keeps a low, steady stream of ordinary payments while it waits for a result, as live traffic would.
 
 \subsubsection{Results}
-\plan{This subsection reports the output of the job for a simulated mule ring and shows the resulting fraud case.}
+
+The job processed the payments of the fraud simulator on the cloud deployment. For one minute, it reported eleven completed payments from seven unique customers, with a completed amount of Rs 54,250. This amount equals six mule payments of Rs 9,000 and five steady payments of Rs 50, which confirms the aggregation. The job also emitted a \code{MULE\_FAN\_IN} signal with six distinct senders for the mule account. The Fraud Alert service turned the signal into a case and froze the account. The consumer group of the job showed no lag on the input topic, so the job kept up with the stream.
+
+The same SQL also runs in the continuous integration pipeline. A test starts a local Flink mini-cluster, replaces the Kafka tables with files, and checks the outputs of every query. A change that breaks a query therefore fails before it reaches the cloud.
 
 \screenshotplaceholder{flink-results}{Window statistics and fraud signals produced by the stream processing job.}{The analytics-results and risk-signals output, the Stream analytics table and the open fraud cases.}{5cm}
-
 
 % =====================================================================  8
 \section{Quality Attributes and Evaluation}
@@ -870,6 +946,9 @@ Run & Configuration & Failed requests & p95 latency & Payments completed \\
 
 \begin{longtable}{@{}L{3.2cm}L{4.3cm}L{6.6cm}@{}}
 \caption{Principal design decisions, the alternatives considered and the reasons for each choice.}\label{tab:rationale}\\
+\toprule
+Decision & Alternatives considered & Reason \\
+\midrule\endfirsthead
 \toprule
 Decision & Alternatives considered & Reason \\
 \midrule\endhead

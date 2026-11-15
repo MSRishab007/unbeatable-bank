@@ -22,6 +22,10 @@
 \usepackage[hidelinks]{hyperref}
 \usepackage[nameinlink,capitalise]{cleveref}
 
+% Ragged-right table columns, so narrow cells don't stretch their word spacing.
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+
 \definecolor{planbg}{HTML}{EEF2FB}
 \definecolor{planrule}{HTML}{2D2AE6}
 \definecolor{figbg}{HTML}{F5F5F7}
@@ -158,76 +162,94 @@ The rest of this document is organised as follows. \Cref{sec:overview} gives an 
 \section{System Overview}
 \label{sec:overview}
 
+This section describes what \project{} does for its users and how it defends each payment. It then relates the services to those of scenario S17 and shows where each platform requirement is met.
+
 \subsection{Functional Scope}
-\plan{This subsection describes what customers and staff can do. Customers register, complete KYC, open savings, current, fixed deposit and recurring deposit accounts, pay by account number, pay ID or QR code, and manage their security settings. Staff members review KYC documents, work fraud cases, approve sensitive actions under a maker-checker rule, and run the branch desk.}
+\label{sec:scope}
+
+\project{} serves two groups of users, customers and bank staff. Both groups use the same web application, which the API Gateway serves from a single public address.
+
+A customer registers with a name, date of birth, mobile number, email address and password. The customer then uploads identity documents for the know-your-customer (KYC) check. In this check, the bank verifies the identity of a new customer before money can move. Once the bank accepts these documents, the customer can hold any number of savings and current accounts, alone or jointly with another customer. The customer can also book fixed deposits and recurring deposits. A fixed deposit locks a sum for a chosen term at a fixed rate. A recurring deposit collects a fixed instalment every month. The application shows a quote with the maturity amount before the customer commits, and it prices any early closure in advance.
+
+Customers pay one another by account number, by a chosen pay identifier such as \code{riya@unbeatable}, or by scanning a QR code. Every payment shows the name of the payee before any money moves. A new payee can receive only a limited amount during the first 24 hours. This delay gives the customer time to notice a payee that someone else added. After each payment, the application shows the checks that the payment passed and the check that stopped it, if any. Customers receive receipts, one-time passwords and security alerts in an in-app inbox, by email, and through a simulated RCS channel. They can download monthly statements, and anyone can verify that a statement file was issued by the bank.
+
+Customers also control the security of their own accounts. Each customer sets a six-digit payment PIN for money transfers and a four-digit app PIN that unlocks the application. The application locks itself after five minutes without use. A customer can review the devices and sessions that hold access and sign any of them out. A customer can also cancel a payment that the bank has held for review and report a payment as fraudulent. In an emergency, a single action blocks all access to every account.
+
+Bank staff work in a console that shows only the functions of their role. KYC officers review identity documents and accept or reject them. Fraud analysts work through alerts and cases, release or cancel held payments, and freeze accounts. Tellers record cash deposits at the branch desk. Administrators configure the notification channels and monitor the stream analytics and DynaStore. Sensitive actions follow a maker-checker rule, under which one staff member proposes the action and a second staff member approves it. Unfreezing an account is one such action. \Cref{fig:app-overview} shows the customer application.
 
 \screenshotplaceholder{app-overview}{Customer application showing the home screen and the payment flow.}{Phone screenshots of Home, Pay with the swipe control, and the payment result with its six checks.}{5cm}
 
 \subsection{Layered Payment Defence}
-\plan{This subsection introduces the five layers that every payment passes through, from admission control to fraud response, in one table and one paragraph. \Cref{sec:fraud} describes each layer in depth.}
+\label{sec:layers}
+
+Every payment passes five layers of defence before and after money moves. \Cref{tab:layers} lists the layers in the order in which they act. The first three layers act synchronously, while the customer waits for the answer. The last two layers act on the stream of events that completed payments produce.
 
 \begin{table}[H]\centering\small
 \caption{Layers of defence applied to each payment.}\label{tab:layers}
-\begin{tabularx}{\linewidth}{@{}lllX@{}}
+\begin{tabularx}{\linewidth}{@{}L{2.4cm}L{2.3cm}L{2.9cm}Y@{}}
 \toprule
 Layer & Time scale & Service & Technique \\
 \midrule
-Admission & Before processing & Rate Limit Coordinator & \\
-Authorisation and policy & Synchronous & Account, Transaction Intake & \\
-Real-time risk & Tens of milliseconds & Risk Detection & \\
-Stream analytics & Seconds to minutes & Audit Analytics (Flink) & \\
-Response & Minutes & Fraud Alert & \\
+Admission & Before processing & Rate Limit Coordinator & Sliding-window limits per customer, account, device and IP address, kept as conflict-free counters in DynaStore \\
+Authorisation and policy & Synchronous & API Gateway, Account, Transaction Intake & PIN check, holder and account status checks, and limits per payment, per day and per new payee \\
+Real-time risk & Tens of milliseconds & Risk Detection & Twenty-one weighted rules over features in DynaStore, with a score that allows, challenges, holds or blocks the payment \\
+Stream analytics & Seconds to minutes & Audit Analytics (Flink) & Windowed aggregations that detect bursts, probing, structuring and mule fan-in \\
+Response & Minutes & Fraud Alert & Alerts, automatic freezes, cases with maker-checker review, and signals fed back to the risk engine \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
+The admission layer stops abusive volumes cheaply, before any other service does work. The authorisation layer confirms that the customer may use the account and that the payment respects the account limits. The risk layer scores the payment against the recent behaviour of the customer, the device and the payee. A payment with a moderate score needs a one-time password, and a payment with a high score waits for an analyst. The stream analytics layer looks at many payments together and finds patterns that no single payment reveals. The response layer turns these findings into alerts and cases. It also writes short-lived signals into DynaStore, so that the risk engine scores the next payment from a flagged account higher. The slow layers therefore improve the decisions of the fast layers over time. \Cref{sec:fraud} describes each layer in depth.
 
 \subsection{Mapping to the Scenario Services}
 \label{sec:s17map}
-\plan{This subsection lists the eight services that scenario S17 suggests and the \project{} service that implements each one. It then explains the four services that the team added, which are the API Gateway, the Identity and Authentication service, the Deposits service and DynaStore, and why a working bank needs each of them.}
+
+Scenario S17 suggests eight services. \Cref{tab:s17} lists each of them with its role in the scenario and the \project{} service that implements it. The platform keeps the names and the responsibilities of all eight services. The Notification Service runs as a serverless function and the Audit Analytics Service runs as a stream processing job. The other six services run on Kubernetes.
 
 \begin{table}[H]\centering\small
 \caption{Services suggested by scenario S17 and their implementation in \project{}.}\label{tab:s17}
-\begin{tabularx}{\linewidth}{@{}lXl@{}}
+\begin{tabularx}{\linewidth}{@{}L{3.6cm}YL{3.6cm}@{}}
 \toprule
 Scenario service & Role in the scenario & \project{} service \\
 \midrule
-Account Service & Maintains simulated account metadata & Account \\
+Account Service & Maintains account metadata & Account \\
 Transaction Intake Service & Accepts transaction requests & Transaction Intake \\
-Rate Limit Coordinator & Shared rate-limit state and permit allocation & Rate Limit Coordinator \\
+Rate Limit Coordinator & Keeps shared rate-limit state and allocates permits & Rate Limit Coordinator \\
 Ledger Service & Records accepted transactions & Ledger \\
 Risk Detection Service & Evaluates transactions against risk rules & Risk Detection \\
 Fraud Alert Service & Reports suspicious transaction patterns & Fraud Alert \\
 Notification Service & Sends transaction outcomes & Notification (Cloud Function) \\
-Audit Analytics Service & Measures rate-limit decisions, throughput and rejections & Audit Analytics (Flink) \\
-\midrule
-\multicolumn{3}{@{}l}{Added by the team: API Gateway, Identity and Authentication, Deposits and End of Day, DynaStore} \\
+Audit Analytics Service & Measures rate-limit decisions, throughput and rejected requests & Audit Analytics (Flink on Dataproc) \\
 \bottomrule
 \end{tabularx}
 \end{table}
+
+The platform adds four services to the eight. The API Gateway is the only public entry point. It verifies every request, checks the role of the caller and the ownership of the account, and serves the web application. The Identity and Authentication service manages registration, sign-in, sessions, devices, PINs, one-time passwords and KYC documents. Without it, the system could not tell a customer from an attacker who holds a stolen password. The Deposits service manages fixed and recurring deposits and runs the end-of-day batch, which accrues interest, collects instalments and pays out matured deposits. DynaStore implements the leaderless replication concept of the scenario. It holds the rate-limit counters and risk features that the Rate Limit Coordinator and the Risk Detection service read and write on every payment.
 
 \subsection{Requirement Traceability}
 \label{sec:traceability}
-\plan{This subsection maps each platform requirement to the part of the system that meets it and to the location in the repository. The table lets the reader verify coverage at a glance, and the text points to the section that discusses each requirement in depth.}
 
-\begin{table}[H]\centering\small
+\Cref{tab:traceability} maps each platform requirement to the part of the system that meets it and to the section that discusses it in depth.
+
+\begin{table}[htbp]\centering\small
 \caption{Mapping of platform requirements to the implementation.}\label{tab:traceability}
-\begin{tabularx}{\linewidth}{@{}lXl@{}}
+\begin{tabularx}{\linewidth}{@{}L{3.6cm}YL{1.7cm}@{}}
 \toprule
 Requirement & Implementation & Section \\
 \midrule
-Infrastructure as Code & & \cref{sec:iac} \\
-Serverless function and communication & & \cref{sec:interconnection} \\
-Managed Kubernetes, autoscaling and load test & & \cref{sec:scalability} \\
-GitOps controller & & \cref{sec:gitops} \\
-Stream processing on a managed cluster & & \cref{sec:streaming} \\
-Leaderless replication concept & & \cref{sec:concept} \\
-Multiple storage products & & \cref{sec:storage} \\
-Observability & & \cref{sec:observability} \\
+Public web service and at least eight microservices & Twelve services, with the API Gateway reachable over HTTPS through a Google load balancer and Traefik & \cref{sec:microservices} \\
+Infrastructure as Code & Terraform in three layers provisions the network, cluster, databases, storage, IAM policies, secrets, function and Dataproc cluster & \cref{sec:iac} \\
+Serverless function & The Notification Service runs as a Cloud Function that Pub/Sub triggers asynchronously & \cref{sec:interconnection} \\
+REST, gRPC and message queues & REST between the client and the services, gRPC on the payment path and inside DynaStore, Kafka and Pub/Sub for events & \cref{sec:interconnection} \\
+Managed Kubernetes, autoscaling and load test & GKE hosts the stateless services, six horizontal pod autoscalers scale on CPU, and k6 generates sustained load & \cref{sec:scalability} \\
+GitOps controller & ArgoCD tracks the repository and applies every release, and no deployment uses kubectl apply & \cref{sec:gitops} \\
+Stream processing on a managed cluster & A Flink SQL job on Dataproc reads a Kafka topic, aggregates over time windows and writes results to separate Kafka topics & \cref{sec:streaming} \\
+Leaderless replication concept & DynaStore implements consistent hashing, quorums, vector clocks, conflict-free counters, hinted handoff, read repair and anti-entropy & \cref{sec:concept} \\
+Multiple storage products & Cloud SQL for PostgreSQL, Firestore and Cloud Storage, together with DynaStore and Kafka & \cref{sec:storage} \\
+Observability & Prometheus and Grafana for metrics, and Cloud Logging for the logs of every service and of the Flink job & \cref{sec:observability} \\
 \bottomrule
 \end{tabularx}
 \end{table}
-
 
 % =====================================================================  3
 \section{Cloud Deployment Architecture}
@@ -278,7 +300,7 @@ Observability & & \cref{sec:observability} \\
 \subsection{Service Responsibilities}
 \plan{This subsection describes each service in its own paragraph, grouped by area. The groups are the edge and identity services, the core banking services, the admission control services, the fraud and analytics services, the deposits service, and DynaStore. Each paragraph states what the service is responsible for, where it runs and which data it owns. A summary table follows the paragraphs.}
 
-\begin{longtable}{@{}p{0.5cm}p{3.2cm}p{7.6cm}p{2.6cm}@{}}
+\begin{longtable}{@{}L{0.5cm}L{3.2cm}L{7.6cm}L{2.6cm}@{}}
 \caption{Responsibilities, runtime and data ownership of each service.}\label{tab:services}\\
 \toprule
 No. & Service & Responsibility & Runs on and data \\
@@ -355,7 +377,7 @@ No. & Service & Responsibility & Runs on and data \\
 \subsection{Real-Time Risk Scoring}
 \plan{This subsection describes the risk engine. It explains how DynaStore holds the risk features, lists the 21 rules with their weights in a table, and explains the four score bands. It argues why a weak signal alone can never block a payment, and describes the one-time password challenge, the analyst hold, shadow mode for new rules, and the reasons that the customer sees.}
 
-\begin{longtable}{@{}p{4.2cm}p{1.2cm}p{8.4cm}@{}}
+\begin{longtable}{@{}L{4.2cm}L{1.2cm}L{8.4cm}@{}}
 \caption{Rules of the real-time risk engine and their weights.}\label{tab:rules}\\
 \toprule
 Rule & Weight & Condition \\
@@ -374,7 +396,7 @@ Rule & Weight & Condition \\
 
 \begin{table}[H]\centering\small
 \caption{Outcome of the eight fraud simulator scenarios.}\label{tab:simulator}
-\begin{tabularx}{\linewidth}{@{}lXl@{}}
+\begin{tabularx}{\linewidth}{@{}lYl@{}}
 \toprule
 Scenario & Layer that responded & Outcome \\
 \midrule
@@ -400,7 +422,7 @@ Mule ring & & \\
 
 \begin{table}[H]\centering\small
 \caption{Storage products, the data each one holds, and the reason for the choice.}\label{tab:storage}
-\begin{tabularx}{\linewidth}{@{}p{3cm}XX@{}}
+\begin{tabularx}{\linewidth}{@{}L{3cm}YY@{}}
 \toprule
 Product & Data held & Reason for the choice \\
 \midrule
@@ -516,7 +538,7 @@ Run & Configuration & Failed requests & p95 latency & Payments completed \\
 \label{sec:rationale}
 \plan{This section collects the main design decisions in one place, which a design document must justify. Each decision states the choice, the alternatives considered and the reason for the choice. The decisions cover the cloud provider, GKE with Spot nodes, Kafka inside the cluster, the split between PostgreSQL and DynaStore, gRPC on the hot path, the outbox pattern, the Cloud Function for notifications, Flink SQL on Dataproc, Terraform layering, pull-request releases with ArgoCD, and the edge with Traefik.}
 
-\begin{longtable}{@{}p{3.2cm}p{4.3cm}p{6.6cm}@{}}
+\begin{longtable}{@{}L{3.2cm}L{4.3cm}L{6.6cm}@{}}
 \caption{Principal design decisions, the alternatives considered and the reasons for each choice.}\label{tab:rationale}\\
 \toprule
 Decision & Alternatives considered & Reason \\

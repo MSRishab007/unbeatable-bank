@@ -1,0 +1,49 @@
+---
+config:
+  layout: elk
+---
+flowchart TB
+  client(["Browser"]) --> gw["API Gateway"]
+  subgraph adm["Transaction admission"]
+    
+    in["Transaction<br/>Intake"]
+    rl["Rate Limit<br/>Coordinator"]
+    rk["Risk<br/>Detection"]
+  end
+  subgraph core["Core banking"]
+    
+    id["Identity and<br/>Authentication"]
+    acc["Account"]
+    dep["Deposits"]
+    led["Ledger"]
+  end
+  subgraph mon["Fraud monitoring"]
+    
+    fr["Fraud Alert"]
+    fl["Audit Analytics<br/>Flink"]
+  end
+  dyn[("DynaStore")]
+  k[["Kafka"]]
+  ps[["Pub/Sub"]] --> nf["Notification<br/>Cloud Function"]
+
+  gw --> in & id & acc & dep & fr
+  in --> acc
+  acc --> led
+  dep --> led
+  fr --> acc
+  in ==> rl & rk & led
+  id ==> rl
+  rl ==> dyn
+  rk ==> dyn
+  in -.-> k
+  led -.-> k
+  k -.-> fl
+  fl -.-> k
+  k -.-> fr
+  fr -.-> ps
+  id -.-> ps
+
+  linkStyle 0,1,2,3,4,5,6,7,8,9,10 stroke:#3d4a5c,stroke-width:1.4px
+  linkStyle 11,12,13,14,15,16 stroke:#1f6feb,stroke-width:2.6px
+  linkStyle 17,18,19,20,21 stroke:#b35900,stroke-width:1.8px,stroke-dasharray:6
+  linkStyle 22,23 stroke:#2e8b57,stroke-width:1.8px,stroke-dasharray:2

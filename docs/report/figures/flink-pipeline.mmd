@@ -1,0 +1,19 @@
+---
+config:
+  layout: elk
+---
+flowchart LR
+  in[["Kafka<br/>txn-events"]] --> src
+  subgraph job["Flink SQL job on Dataproc"]
+    src["Source table<br/>event time, 5 s watermark"]
+    w1["1-minute tumbling<br/>window statistics"]
+    w2["Fraud pattern windows<br/>tumbling and hopping"]
+    src --> w1
+    src --> w2
+  end
+  w1 --> o1[["Kafka<br/>analytics-results"]]
+  w2 --> o2[["Kafka<br/>risk-signals"]]
+  o1 --> fr["Fraud Alert"]
+  o2 --> fr
+  fr --> cases["Cases, freezes<br/>and staff console"]
+  job -. "checkpoint every 30 s" .-> gcs[("Cloud Storage")]

@@ -1,0 +1,38 @@
+sequenceDiagram
+  participant C as Client
+  participant G as Gateway
+  participant I as Identity
+  participant T as Intake
+  participant R as Rate Limit
+  participant A as Account
+  participant K as Risk
+  participant L as Ledger
+  participant Q as Kafka
+  participant F as Fraud Alert
+  participant N as Notification
+  C->>G: POST payment with Idempotency-Key
+  G->>I: verify session
+  G->>T: create payment
+  T->>T: idempotency check
+  T->>R: Check (gRPC)
+  R-->>T: allowed
+  T->>I: verify payment PIN
+  T->>A: precheck accounts and payee
+  T->>K: Evaluate (gRPC)
+  K-->>T: score and decision
+  alt score below 30
+    T->>L: PostJournal (gRPC)
+    L-->>T: journal posted
+  else score 30 to 59
+    T-->>C: one-time password required
+  else score 60 to 94
+    T->>L: CreateHold (gRPC)
+    Note over T,L: held for analyst review
+  else score 95 or above
+    T-->>C: declined
+  end
+  T->>Q: txn-events via outbox
+  T-->>G: result
+  G-->>C: result with checks
+  Q->>F: consume event
+  F->>N: receipt via Pub/Sub

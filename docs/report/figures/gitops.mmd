@@ -1,0 +1,15 @@
+---
+config:
+  layout: elk
+---
+flowchart LR
+  dev(["Developer"]) -- "pull request" --> main["main branch"]
+  main --> ci["CI workflow<br/>tests, lint, plan"]
+  main --> rel["Release workflow<br/>builds images"]
+  rel -- "push, tagged<br/>with commit SHA" --> ar[("Artifact<br/>Registry")]
+  rel -- "opens" --> pr["Deploy pull request<br/>new image tags"]
+  pr -- "merge is<br/>the release" --> main
+  argo["ArgoCD"] -. "watches" .-> main
+  argo --> pre["PreSync jobs<br/>database migrations"]
+  pre --> roll["Rolling update<br/>of the pods"]
+  ar -. "image pull" .-> roll

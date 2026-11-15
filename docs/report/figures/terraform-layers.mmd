@@ -1,0 +1,31 @@
+---
+config:
+  layout: elk
+---
+flowchart LR
+  subgraph b["1. bootstrap, applied once"]
+    b1["Project and APIs"]
+    b2["Team IAM roles"]
+    b3["State bucket"]
+    b4["Workload Identity<br/>Federation for GitHub"]
+    b5["Budget alerts"]
+  end
+  subgraph m["2. main, workload infrastructure"]
+    m1["VPC, subnet<br/>and firewall"]
+    m2["GKE cluster<br/>and node pool"]
+    m3["Cloud SQL, Firestore<br/>and buckets"]
+    m4["Pub/Sub and<br/>Cloud Function"]
+    m5["Dataproc"]
+    m6["Service accounts<br/>and secrets"]
+  end
+  subgraph p["3. platform, inside the cluster"]
+    p1["bank namespace"]
+    p2["Kubernetes secret<br/>and config map"]
+    p3["Workload identity<br/>service account"]
+    p4["ArgoCD and<br/>root application"]
+  end
+  b3 -- "stores state of" --> m
+  b3 -- "stores state of" --> p
+  m2 -- "cluster endpoint" --> p
+  m6 -- "secret values" --> p2
+  p4 -- "deploys" --> apps(["All workloads<br/>from Git"])

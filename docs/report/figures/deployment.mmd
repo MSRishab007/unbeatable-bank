@@ -1,0 +1,39 @@
+---
+config:
+  layout: elk
+---
+flowchart LR
+  users(["Customers<br/>and staff"]) --> lb
+  k6(["k6 load test"]) --> lb
+  subgraph gcp["Google Cloud project, region us-central1, VPC ub-vpc"]
+    
+    lb["Network<br/>load balancer"]
+    subgraph gke["GKE cluster on Spot nodes"]
+      
+      traefik["Traefik<br/>HTTPS edge"]
+      subgraph bank["bank namespace"]
+        
+        gw["API Gateway"] --> svc["Ten business<br/>services"]
+        svc --> dyn[("DynaStore<br/>3 replicas")]
+      end
+      kafka[("Kafka<br/>Strimzi")]
+      plat["ArgoCD, Prometheus,<br/>Grafana, cert-manager"]
+      traefik --> gw
+    end
+    subgraph managed["Managed services"]
+      
+      sql[("Cloud SQL<br/>PostgreSQL 16")]
+      fs[("Firestore")]
+      gcs[("Cloud Storage")]
+      ps["Pub/Sub"] --> fn["Cloud Function<br/>notifications"]
+      dp["Dataproc<br/>Flink job"]
+      ops["Secret Manager, Artifact<br/>Registry, Cloud Logging"]
+    end
+    lb --> traefik
+  end
+  svc --> sql
+  svc --> fs
+  svc --> gcs
+  svc --> ps
+  svc --> kafka
+  kafka <--> dp

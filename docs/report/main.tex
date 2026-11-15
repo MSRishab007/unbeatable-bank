@@ -82,15 +82,15 @@
 \toprule
 \textbf{ID number} & \textbf{Name} \\
 \midrule
-20XXXXXXXXXX & Member 1 \\
-20XXXXXXXXXX & Member 2 \\
-20XXXXXXXXXX & Member 3 \\
-20XXXXXXXXXX & Member 4 \\
+2025H1030064 & Ashish Shetty \\
+2025H1030066  & S Rishab   \\
+2025H1030060  & Jenil Gandhi \\
+2025H1030049  & Manmay Maheshwari \\
 \bottomrule
 \end{tabular}
 \vfill
 {\small Source repository: \repourl\\[2pt]
-Live deployment (available during the demonstration): \liveurl\par}
+Live deployment: \liveurl\par}
 \vspace{0.5cm}
 {\small November 2026\par}
 \end{titlepage}
@@ -264,7 +264,10 @@ This section describes how \project{} is deployed on Google Cloud. It covers the
 
 A request from a customer travels as follows. The browser resolves the public host name to the address of a Google load balancer. The load balancer forwards the connection to Traefik, an edge proxy inside the cluster that terminates HTTPS. Traefik passes the request to the API Gateway, which authenticates it and calls the internal services. These services read and write Cloud SQL, Firestore, Cloud Storage and DynaStore. They publish events to Kafka and notification requests to Pub/Sub. The Flink job on Dataproc consumes the Kafka events, and the Cloud Function consumes the Pub/Sub messages. Cloud Logging collects the logs of every component, and Prometheus collects the metrics of every service.
 
-\mermaidplaceholder{deployment}{Cloud deployment architecture of \project{} on Google Cloud.}{Users and the load test reach a Google load balancer, then Traefik and the API Gateway in GKE. The bank namespace holds the services, DynaStore and Kafka. Cloud SQL, Firestore, Cloud Storage, Pub/Sub, the Cloud Function, Dataproc, Secret Manager, Artifact Registry and Cloud Logging sit around the cluster inside one VPC.}{7cm}
+\begin{figure}[H]\centering
+\includegraphics[width=\linewidth]{figures/deployment}
+\caption{Cloud deployment architecture of \project{} on Google Cloud.}\label{fig:deployment}
+\end{figure}
 
 \subsection{Compute Platform}
 \label{sec:compute}
@@ -320,7 +323,10 @@ The bootstrap layer creates the foundation. It creates the project, enables the 
 
 Terraform also generates the secrets. It creates a random password for each database user and a random key for signing tokens, and it stores them in Secret Manager. The configuration therefore never contains a secret, and the repository holds only example variable files. The Terraform state lives in a versioned Cloud Storage bucket, so every operator works from the same state.
 
-\mermaidplaceholder{terraform-layers}{Layers of the Terraform configuration and the resources each layer manages.}{Three stacked layers, bootstrap, main and platform, with the resources each one creates and the dependencies between them.}{5cm}
+\begin{figure}[H]\centering
+\includegraphics[width=0.62\linewidth]{figures/terraform-layers}
+\caption{Layers of the Terraform configuration and the resources each layer manages.}\label{fig:terraform-layers}
+\end{figure}
 
 \subsection{Continuous Delivery and GitOps}
 \label{sec:gitops}
@@ -333,7 +339,10 @@ Merging the deployment pull request is the release. ArgoCD tracks the main branc
 
 ArgoCD manages nine applications through the app-of-apps pattern. In this pattern, a root application declares the other applications as its resources. The root application declares the bank services, the Kafka operator and cluster, the monitoring stack and its dashboards, cert-manager, Traefik and the edge configuration. Third-party components such as Traefik and the monitoring stack come from Helm charts with pinned versions. The bank services come from plain manifests that a script generates from one description of all services.
 
-\mermaidplaceholder{gitops}{Delivery pipeline from a commit to the cluster through GitHub Actions and ArgoCD.}{A commit to main triggers CI and the image build, which push to Artifact Registry and open a deploy pull request. Merging it updates the manifests on main, and ArgoCD syncs the cluster after running migrations.}{5cm}
+\begin{figure}[H]\centering
+\includegraphics[width=\linewidth]{figures/gitops}
+\caption{Delivery pipeline from a commit to the cluster through GitHub Actions and ArgoCD.}\label{fig:gitops}
+\end{figure}
 
 \subsection{Identity and Access Management}
 \label{sec:iam}
@@ -360,13 +369,16 @@ This section describes how \project{} is divided into services, what each servic
 \subsection{Service Decomposition}
 \label{sec:decomposition}
 
-\project{} consists of twelve services. \Cref{fig:services} shows them with the calls between them. The decomposition follows business capabilities. Each service owns one capability of the bank, such as accounts, money movement or risk scoring. Each service also owns its data, and no other service reads or writes that data directly. A service that needs information from another service asks for it through the API of that service or learns it from an event.
+\project{} consists of twelve services. \Cref{fig:services} shows them with the calls between them and the mechanism of each call. The decomposition follows business capabilities. Each service owns one capability of the bank, such as accounts, money movement or risk scoring. Each service also owns its data, and no other service reads or writes that data directly. A service that needs information from another service asks for it through the API of that service or learns it from an event.
 
 This ownership has two benefits. First, a team can change the internal design of a service without breaking the others, as long as its API stays compatible. Second, each service can scale and fail independently. A slow risk engine, for example, cannot corrupt the ledger, because the ledger accepts changes only through its own interface.
 
 Ten of the services run as containers on GKE. They are written in Python 3.12. They offer REST interfaces built with FastAPI, and four of them also offer gRPC interfaces. Every service exposes three standard endpoints. The \code{/healthz} endpoint reports that the process is alive. The \code{/readyz} endpoint reports that the service can accept traffic. The \code{/metrics} endpoint publishes Prometheus metrics. The Notification Service runs as a Cloud Function, and the Audit Analytics Service runs as a Flink job on Dataproc.
 
-\mermaidplaceholder{services}{Microservices of \project{} and the interactions between them.}{The gateway calls the services over REST. Intake calls Rate Limit, Risk and Ledger over gRPC. Rate Limit and Risk use DynaStore. Kafka carries events to Flink and Fraud Alert, and Pub/Sub carries notifications to the Cloud Function.}{8cm}
+\begin{figure}[H]\centering
+\includegraphics[height=12.5cm]{figures/services}
+\caption{Microservices of \project{} and the interactions between them. Grey solid arrows are REST calls, thick blue arrows are gRPC calls, orange dashed arrows are Kafka events and green dotted arrows are Pub/Sub messages.}\label{fig:services}
+\end{figure}
 
 \subsection{Service Responsibilities}
 \label{sec:responsibilities}
@@ -415,6 +427,9 @@ This subsection describes each service in turn, grouped by area. \Cref{tab:servi
 \caption{Responsibilities, runtime and data ownership of each service.}\label{tab:services}\\
 \toprule
 No. & Service & Responsibility & Runtime and data \\
+\midrule\endfirsthead
+\toprule
+No. & Service & Responsibility & Runtime and data \\
 \midrule\endhead
 1 & API Gateway & Single public entry point, token and session checks, role and ownership checks, PIN checks, web applications & GKE with autoscaling, no data \\
 2 & Identity and Authentication & Registration, sign-in, tokens, sessions, devices, PINs, one-time passwords, KYC documents & GKE with autoscaling, Cloud SQL, Firestore, Cloud Storage \\
@@ -452,7 +467,10 @@ For a payment that continues, the Transaction Intake service checks and reserves
 
 The web application shows the outcome together with the six visible checks. These are the duplicate check, the rate limits, the account and payee check, the limits, the risk engine and the ledger posting. When a check stops the payment, the application shows which check stopped it and why. If a dependency fails during the pipeline, the payment stays in a processing state. The client can then retry with the same idempotency key, and the retry continues from where the first attempt stopped.
 
-\mermaidplaceholder{payment-sequence}{Sequence of calls for a single payment.}{The client, gateway, Identity, Intake, Rate Limit, Account, Risk, Ledger, Kafka and the Notification function, with the PIN check, the idempotency check, the risk decision and its four outcomes, the double-entry posting, the outbox event to Kafka, and the receipt that Fraud Alert sends through Pub/Sub to the Notification function.}{9cm}
+\begin{figure}[H]\centering
+\includegraphics[width=\linewidth]{figures/payment-sequence}
+\caption{Sequence of calls for a single payment.}\label{fig:payment-sequence}
+\end{figure}
 
 \subsection{Client Applications}
 \label{sec:clients}
@@ -470,7 +488,7 @@ This section describes how the services of \project{} communicate. It explains t
 \subsection{Overview}
 \label{sec:comm-overview}
 
-The services communicate through four mechanisms, which are REST, gRPC, Kafka and Pub/Sub. \Cref{fig:communication} shows which mechanism connects each pair of services. One rule decides the choice. Requests that a person makes and waits for use REST. Calls on the hot path of every payment use gRPC. Events that several consumers must receive in order, and possibly replay later, use Kafka. The trigger of the serverless function uses Pub/Sub. \Cref{tab:mechanisms} summarises the mechanisms and their uses.
+The services communicate through four mechanisms, which are REST, gRPC, Kafka and Pub/Sub. \Cref{fig:services} shows which mechanism connects each pair of services. One rule decides the choice. Requests that a person makes and waits for use REST. Calls on the hot path of every payment use gRPC. Events that several consumers must receive in order, and possibly replay later, use Kafka. The trigger of the serverless function uses Pub/Sub. \Cref{tab:mechanisms} summarises the mechanisms and their uses.
 
 \begin{table}[H]\centering\small
 \caption{Communication mechanisms and their uses.}\label{tab:mechanisms}
@@ -485,8 +503,6 @@ Pub/Sub & Asynchronous message queue & Notification requests to the Cloud Functi
 \bottomrule
 \end{tabularx}
 \end{table}
-
-\mermaidplaceholder{communication}{Communication mechanisms used between services.}{The same services as the decomposition figure, with REST, gRPC, Kafka and Pub/Sub links drawn in four different line styles and a legend.}{7cm}
 
 \subsection{REST}
 \label{sec:rest}
@@ -543,7 +559,10 @@ A service that changes its database and then publishes an event faces a dual-wri
 
 The relay may publish an event twice if it crashes after Kafka acknowledges the event and before it marks the row. Delivery is therefore at least once. Every consumer tolerates duplicates by recording the identifiers of the events it has processed and skipping any event it has already seen. Several replicas of a service can run their relays at the same time. Each relay locks the rows it publishes and skips the rows that another relay holds.
 
-\mermaidplaceholder{outbox}{Transactional outbox between a service database and Kafka.}{A service writes the business row and the outbox row in one transaction. The relay sidecar reads the outbox and publishes to Kafka, and consumers deduplicate by event identifier.}{4.5cm}
+\begin{figure}[H]\centering
+\includegraphics[width=0.9\linewidth]{figures/outbox}
+\caption{Transactional outbox between a service database and Kafka.}\label{fig:outbox}
+\end{figure}
 
 \subsection{Serverless Notification with Pub/Sub}
 \label{sec:pubsub}
@@ -592,7 +611,10 @@ Defence in depth places several independent controls in the path of an attack, s
 
 The layers differ in speed and in breadth of view. Admission control is the cheapest layer and sees only counts. The authorisation layer sees the account and its limits. The risk engine sees the recent history of the customer, the device and the payee, and it decides within tens of milliseconds. Stream analytics sees all payments over windows of up to an hour, but it reports after the window closes. Case management brings in human judgement. The slow layers feed their findings back into the fast layers through signals in DynaStore. The system therefore improves its real-time decisions with knowledge that only the slow layers can gather.
 
-\mermaidplaceholder{fraud-layers}{Path of a payment through the five layers of defence and the decisions each layer can take.}{A payment enters admission control, then authorisation and policy, then risk scoring with its four score bands. Accepted payments reach the ledger and the event stream, where stream analytics and the fraud service act after the fact and feed signals back.}{7cm}
+\begin{figure}[H]\centering
+\includegraphics[width=\linewidth]{figures/fraud-layers}
+\caption{Path of a payment through the five layers of defence and the decisions each layer can take.}\label{fig:fraud-layers}
+\end{figure}
 
 \subsection{Admission Control}
 \label{sec:admission}
@@ -790,7 +812,10 @@ Leaderless replication suits the data that admission control uses. The Rate Limi
 
 DynaStore spreads keys across nodes with consistent hashing, which \cref{fig:dynastore-ring} illustrates. The hash function maps every node and every key onto the same circular space. Each node takes 64 positions on the ring, which are called virtual nodes. The many positions spread the keys evenly and give each node a similar share of the ring. To place a key, a node hashes it and walks clockwise from that point. The first three distinct nodes that it meets form the preference list of the key, which is the set of replicas that store it. When a node joins or leaves, only the keys next to its positions move, so most keys stay where they are.
 
-\mermaidplaceholder{dynastore-ring}{Consistent hashing ring of the three DynaStore nodes and the preference list of one key.}{A ring with virtual node positions for three nodes and one key placed on it, with arrows to the first three distinct nodes clockwise.}{6cm}
+\begin{figure}[H]\centering
+\includegraphics[width=0.72\linewidth]{figures/dynastore-ring}
+\caption{Consistent hashing ring of the three DynaStore nodes and the preference list of one key.}\label{fig:dynastore-ring}
+\end{figure}
 
 \subsubsection{Replication and Tunable Quorums}
 
@@ -869,7 +894,10 @@ Fraud signals & 1 to 60 minutes, tumbling and hopping & The five signals of \cre
 
 \Cref{tab:flink-outputs} lists the outputs. The per-minute statistics include the number of unique customers in each window, which Flink computes as a distinct count over the window. The Fraud Alert service stores these statistics, and the staff console shows them on its system page. The windows keep state, such as the open counts and the sets of distinct customers. Flink saves this state to Cloud Storage in a checkpoint every 30 seconds. After a failure, the job restores the last checkpoint and resumes reading Kafka from the offsets saved with it.
 
-\mermaidplaceholder{flink-pipeline}{Stream processing pipeline from the transaction topic to the results and signal topics.}{The txn-events topic feeds the Flink job on Dataproc. Windowed aggregations write to analytics-results and risk-signals, Fraud Alert consumes the signals, and checkpoints go to Cloud Storage.}{5.5cm}
+\begin{figure}[H]\centering
+\includegraphics[width=\linewidth]{figures/flink-pipeline}
+\caption{Stream processing pipeline from the transaction topic to the results and signal topics.}\label{fig:flink-pipeline}
+\end{figure}
 
 \subsubsection{Deployment on Dataproc}
 
@@ -1034,7 +1062,6 @@ Rules and limits in Git & An administrative interface that writes to a database 
 Traefik behind one Google load balancer & GKE Ingress with a Google HTTP load balancer & One regional network load balancer costs less, and Traefik with cert-manager provides HTTPS, redirects and security headers inside the cluster. \\ \addlinespace[3pt]
 \bottomrule
 \end{longtable}
-
 
 % =====================================================================  10
 \section{Conclusion and Future Work}

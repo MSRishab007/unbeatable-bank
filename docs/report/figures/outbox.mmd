@@ -1,0 +1,18 @@
+---
+config:
+  layout: elk
+---
+flowchart LR
+  req(["Request"]) --> svc["Service"]
+  subgraph db["One database transaction"]
+    biz[("Business row")]
+    ob[("Outbox row")]
+  end
+  svc --> biz
+  svc --> ob
+  relay["Relay sidecar<br/>FOR UPDATE SKIP LOCKED"] -- "polls unpublished rows" --> ob
+  relay -- "publish, then<br/>mark published" --> k[["Kafka topic"]]
+  k --> c1["Consumer"]
+  c1 --> dd{"Event ID<br/>already processed?"}
+  dd -- "yes" --> skip(["Skip"])
+  dd -- "no" --> act["Apply effect and record<br/>event ID in one transaction"]

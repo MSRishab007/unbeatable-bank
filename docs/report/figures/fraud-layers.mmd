@@ -1,0 +1,24 @@
+flowchart TB
+  subgraph rt["Before money moves"]
+    direction LR
+    l1["Layer 1<br/>Admission control<br/>rate limits"]
+    l2["Layer 2<br/>Identity and policy<br/>PIN, device, payee"]
+    l3{"Layer 3<br/>Risk score"}
+    l1 -- "within limits" --> l2
+    l2 -- "verified" --> l3
+    l1 -- "over limit" --> dec(["Declined"])
+    l2 -- "fails" --> dec
+    l3 -- "below 30" --> ok["Allow, post<br/>to the ledger"]
+    l3 -- "30 to 59" --> otp["One-time<br/>password"]
+    l3 -- "60 to 94" --> hold["Hold for<br/>review"]
+    l3 -- "95 or above" --> blk(["Block"])
+    otp -- "correct code" --> ok
+  end
+  subgraph af["After the fact"]
+    direction LR
+    ev[["Kafka<br/>txn-events"]] --> l4["Layer 4<br/>Stream analytics<br/>Flink"]
+    ev --> l5["Layer 5<br/>Case management<br/>Fraud Alert"]
+    l4 -- "risk-signals" --> l5
+    l5 -- "freeze, deny list,<br/>signals" --> dyn[("DynaStore<br/>read by layers 1 and 3")]
+  end
+  rt -- "events of allowed and held payments" --> af

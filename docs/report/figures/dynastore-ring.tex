@@ -1,0 +1,38 @@
+% Consistent hashing ring of DynaStore, drawn in TikZ. Included by main.tex.
+% Twelve virtual nodes are drawn (four per node); DynaStore uses 64 per node.
+\begin{tikzpicture}[
+    vn/.style={circle, draw=white, line width=0.8pt, minimum size=9pt, inner sep=0pt},
+    ring/.style={draw=black!70, line width=1pt},
+    lbl/.style={font=\small},
+  ]
+  \definecolor{nA}{HTML}{1F6FEB}\definecolor{nB}{HTML}{B35900}\definecolor{nC}{HTML}{2E8B57}
+  \def\R{2.6}
+  \draw[ring] (0,0) circle (\R);
+  % clockwise walk from the key to the third distinct node
+  \draw[-{Stealth[length=7pt]}, line width=1pt, black!80] (15:\R+0.42) arc[start angle=15, end angle=-90, radius=\R+0.42];
+  % virtual nodes, clockwise from the top
+  \foreach \i/\c in {0/nA,1/nC,2/nA,3/nB,4/nB,5/nA,6/nC,7/nB,8/nA,9/nC,10/nB,11/nC}{
+    \node[vn, fill=\c] (v\i) at ({90-30*\i}:\R) {};
+  }
+  % preference list
+  \foreach \i in {3,5,6}{ \draw[black, line width=1.2pt] (v\i) circle (7.5pt); }
+  \node[lbl, font=\small\bfseries, anchor=west] at ({90-30*3}:\R+0.7) {replica 1};
+  \node[lbl, anchor=west, black!60] at ({90-30*4}:\R+0.7) {skipped, same node};
+  \node[lbl, font=\small\bfseries, anchor=north west] at ({90-30*5}:\R+0.6) {replica 2};
+  \node[lbl, font=\small\bfseries, anchor=north] at ({90-30*6}:\R+0.8) {replica 3};
+  % the key
+  \node[diamond, fill=yellow!70!orange, draw=black, minimum size=10pt, inner sep=0pt] (k) at (15:\R) {};
+  \draw[{Stealth[length=5pt]}-, black!80] (k) -- (35:\R+1.0) node[above right, lbl, inner sep=1pt] {hash(key)};
+  % centre text
+  \node[align=center, font=\small] at (0,0) {\textbf{MD5 hash ring}\\[2pt]{\footnotesize 4 of 64 virtual nodes}\\[-1pt]{\footnotesize per node drawn, $N=3$}\\[4pt]{\footnotesize walk clockwise from the key}};
+  % legend
+  \begin{scope}[shift={(\R+3.0,1.3)}]
+    \foreach \y/\c/\t in {0/nA/dynastore-0, -0.55/nB/dynastore-1, -1.1/nC/dynastore-2}{
+      \node[vn, fill=\c] at (0,\y) {}; \node[lbl, anchor=west] at (0.25,\y) {\code{\t}};
+    }
+    \node[diamond, fill=yellow!70!orange, draw=black, minimum size=10pt, inner sep=0pt] at (0,-1.75) {};
+    \node[lbl, anchor=west] at (0.25,-1.75) {position of the key};
+    \draw[black, line width=1.2pt] (0,-2.35) circle (6pt);
+    \node[lbl, anchor=west] at (0.25,-2.35) {preference list};
+  \end{scope}
+\end{tikzpicture}

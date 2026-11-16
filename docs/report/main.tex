@@ -14,6 +14,8 @@
 \usepackage{longtable}
 \usepackage{array}
 \usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,shapes.geometric}
 \usepackage{float}
 \usepackage{caption}
 \usepackage{enumitem}
@@ -180,9 +182,9 @@ Customers pay one another by account number, by a chosen pay identifier such as 
 
 Customers also control the security of their own accounts. Each customer sets a six-digit payment PIN for money transfers and a four-digit app PIN that unlocks the application. The application locks itself after five minutes without use. A customer can review the devices and sessions that hold access and sign any of them out. A customer can also cancel a payment that the bank has held for review and report a payment as fraudulent. In an emergency, a single action blocks all access to every account.
 
-Bank staff work in a console that shows only the functions of their role. KYC officers review identity documents and accept or reject them. Fraud analysts work through alerts and cases, release or cancel held payments, and freeze accounts. Tellers record cash deposits at the branch desk. Administrators configure the notification channels and monitor the stream analytics and DynaStore. Sensitive actions follow a maker-checker rule, under which one staff member proposes the action and a second staff member approves it. Unfreezing an account is one such action. \Cref{fig:app-overview} shows the customer application.
+Bank staff work in a console that shows only the functions of their role. KYC officers review identity documents and accept or reject them. Fraud analysts work through alerts and cases, release or cancel held payments, and freeze accounts. Tellers record cash deposits at the branch desk. Administrators configure the notification channels and monitor the stream analytics and DynaStore. Sensitive actions follow a maker-checker rule, under which one staff member proposes the action and a second staff member approves it. Unfreezing an account is one such action. \Cref{fig:app-overview} shows the home page of the customer application and the fraud desk of the staff console.
 
-\screenshotplaceholder{app-overview}{Customer application showing the home screen and the payment flow.}{Phone screenshots of Home, Pay with the swipe control, and the payment result with its six checks.}{5cm}
+\screenshotplaceholder{app-overview}{Home page of the customer application (top) and fraud desk of the staff console (bottom).}{Phone screenshots of Home, Pay with the swipe control, and the payment result with its six checks.}{8cm}
 
 \subsection{Layered Payment Defence}
 \label{sec:layers}
@@ -818,7 +820,7 @@ Leaderless replication suits the data that admission control uses. The Rate Limi
 DynaStore spreads keys across nodes with consistent hashing, which \cref{fig:dynastore-ring} illustrates. The hash function maps every node and every key onto the same circular space. Each node takes 64 positions on the ring, which are called virtual nodes. The many positions spread the keys evenly and give each node a similar share of the ring. To place a key, a node hashes it and walks clockwise from that point. The first three distinct nodes that it meets form the preference list of the key, which is the set of replicas that store it. When a node joins or leaves, only the keys next to its positions move, so most keys stay where they are.
 
 \begin{figure}[H]\centering
-\includegraphics[width=0.72\linewidth]{figures/dynastore-ring}
+\input{figures/dynastore-ring.tex}
 \caption{Consistent hashing ring of the three DynaStore nodes and the preference list of one key.}\label{fig:dynastore-ring}
 \end{figure}
 
@@ -918,7 +920,7 @@ The job processed the payments of the fraud simulator on the cloud deployment. F
 
 The same SQL also runs in the continuous integration pipeline. A test starts a local Flink mini-cluster, replaces the Kafka tables with files, and checks the outputs of every query. A change that breaks a query therefore fails before it reaches the cloud.
 
-\screenshotplaceholder{flink-results}{Window statistics and fraud signals produced by the stream processing job.}{The analytics-results and risk-signals output, the Stream analytics table and the open fraud cases.}{5cm}
+\screenshotplaceholder{flink-results}{Per-minute statistics from the stream processing job in the staff console (top) and the cases that its fraud signals opened (bottom).}{The analytics-results and risk-signals output, the Stream analytics table and the open fraud cases.}{5cm}
 
 % =====================================================================  8
 \section{Quality Attributes and Evaluation}
@@ -980,7 +982,7 @@ The team changed the shared library so that a request first waits for a free con
 
 \paragraph{Second run.} The failure rate fell to 4.2 percent and the number of completed payments rose eightfold. The latency remained high, however. The dashboard showed both nodes close to full CPU use. The HPAs had asked for more pods, but the two nodes had no CPU left to run them. DynaStore also slowed down at this point, which explains the hints that \cref{sec:concept} reports. The limit had moved from the software to the size of the cluster.
 
-\paragraph{Third run.} The team repeated the test on three nodes, which a single parameter of the start command selects. The run met both criteria with a failure rate of 0.01 percent and a 95th percentile latency of 1.4 seconds. During the peak, the gateway, Intake and Risk Detection scaled out to several pods each. A few minutes after the test ended, the HPAs returned them to a single pod. \Cref{fig:grafana-loadtest} shows the request rate, the latency and the replica counts during this run.
+\paragraph{Third run.} The team repeated the test on three nodes, which a single parameter of the start command selects. The run met both criteria with a failure rate of 0.01 percent and a 95th percentile latency of 1.4 seconds. During the peak, the gateway, Intake and Risk Detection scaled out to several pods each. A few minutes after the test ended, the HPAs returned them to a single pod. \Cref{fig:grafana-loadtest} shows the request rate, the errors, the latency and the number of running pods during this run.
 
 \screenshotplaceholder{grafana-loadtest}{Grafana dashboard during the final load test.}{Requests per second by service, errors, latency and HPA replicas during run 3.}{6cm}
 
@@ -1012,11 +1014,11 @@ ArgoCD installs Prometheus and Grafana from the community chart. Prometheus scra
 
 \subsubsection{Centralised Logging}
 
-Every service writes its logs to standard output as one JSON object per line. Each object carries the time, the severity, the service name, the message and any structured fields. GKE sends container logs to Cloud Logging automatically, and Dataproc does the same for the Flink job. The logs of every microservice and of the stream processing job therefore live in one place. An operator can search all of them with a single query. Cloud Logging reads the severity field, so a filter on errors works across all services. The system needs no logging stack inside the cluster.
+Every service writes its logs to standard output as one JSON object per line. Each object carries the time, the severity, the service name, the message and any structured fields. GKE sends container logs to Cloud Logging automatically, and Dataproc does the same for the Flink job. The logs of every microservice and of the stream processing job therefore live in one place. An operator can search all of them with a single query. Cloud Logging reads the severity field, so a filter on errors works across all services. The system needs no logging stack inside the cluster. \Cref{fig:cloud-logging} shows one minute of the logs during the final load test. Six services appear in the same query, and the last entry shows the structured fields of one line.
 
 The logs proved their value during the first load test. A query across the bank namespace showed that only the database services reported connection timeouts and that their CPU use was low. This combination pointed to waiting and not to overload, and it led the team to the deadlock that \cref{sec:scalability} describes.
 
-\screenshotplaceholder{cloud-logging}{Cloud Logging view of the service logs.}{A Logs Explorer query across the bank namespace.}{4.5cm}
+\screenshotplaceholder{cloud-logging}{Service logs read from Cloud Logging with the \code{gcloud} command line, filtered to the bank namespace.}{A Logs Explorer query across the bank namespace.}{6.5cm}
 
 \subsection{Security}
 \label{sec:security}

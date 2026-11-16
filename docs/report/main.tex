@@ -1071,8 +1071,16 @@ Traefik behind one Google load balancer & GKE Ingress with a Google HTTP load ba
 \end{longtable}
 
 % =====================================================================  10
+
+\clearpage
 \section{Conclusion and Future Work}
 \label{sec:conclusion}
+
+\subsection{Conclusion}
+
+This document presented the design of \project{}, a banking platform that admits transactions and monitors them for fraud on Google Cloud. Twelve microservices on GKE divide the work of the bank. They communicate through REST, gRPC, Kafka and Pub/Sub, and a serverless function delivers notifications. Terraform creates every cloud resource, and ArgoCD deploys every workload from Git. A payment passes five layers of defence, which are rate limiting, identity controls, real-time risk scoring, stream pattern detection and case management. DynaStore, a Dynamo-style store built for this project, keeps the counters and features of these layers available through node failures. The money itself stays in PostgreSQL under strict transactions.
+
+The evaluation supports the design. Under sustained load, the HPAs scaled the busiest services out and back. The final load test met its criteria with 0.01 percent failed requests and a 95th percentile latency of 1.4 seconds. The first two load tests exposed a deadlock and a capacity limit, and the metrics and logs led the team to both causes. The fraud simulator showed that every attack scenario was caught by its intended layer. The Flink job on Dataproc detected a mule ring that no single payment revealed. The next subsection lists the known limitations of the system, each with a concrete path to removal.
 
 \subsection{Limitations and Future Work}
 \label{sec:limitations}
@@ -1097,12 +1105,7 @@ Uploaded KYC files are checked for type and size but not for malware. & Scan eac
 \end{tabularx}
 \end{table}
 
-\subsection{Conclusion}
-
-This document presented the design of \project{}, a banking platform that admits transactions and monitors them for fraud on Google Cloud. Twelve microservices on GKE divide the work of the bank. They communicate through REST, gRPC, Kafka and Pub/Sub, and a serverless function delivers notifications. Terraform creates every cloud resource, and ArgoCD deploys every workload from Git. A payment passes five layers of defence, which are rate limiting, identity controls, real-time risk scoring, stream pattern detection and case management. DynaStore, a Dynamo-style store built for this project, keeps the counters and features of these layers available through node failures. The money itself stays in PostgreSQL under strict transactions.
-
-The evaluation supports the design. Under sustained load, the HPAs scaled the busiest services out and back. The final load test met its criteria with 0.01 percent failed requests and a 95th percentile latency of 1.4 seconds. The first two load tests exposed a deadlock and a capacity limit, and the metrics and logs led the team to both causes. The fraud simulator showed that every attack scenario was caught by its intended layer. The Flink job on Dataproc detected a mule ring that no single payment revealed. The limitations listed above are known, and each has a concrete path to removal.
-
+\clearpage
 % =====================================================================  references
 \begin{thebibliography}{9}
 \bibitem{dynamo} G. DeCandia, D. Hastorun, M. Jampani, et al. Dynamo: Amazon's highly available key-value store. In \emph{Proceedings of the 21st ACM Symposium on Operating Systems Principles}, 2007.
@@ -1170,7 +1173,7 @@ Each member owns two of the requirement areas and three services. \Cref{tab:task
 ID number & Name & Requirement areas & Services \\
 \midrule
 2025H1030064 & Ashish Shetty & Infrastructure as code, GitOps with ArgoCD & Identity and Authentication, Account, Ledger \\
-2025H1030066  & S Rishab  & Serverless function and communication, GKE with autoscaling and load testing & API Gateway, Transaction Intake, Notification Service \\
+2025H1030066  & S Rishab  & Serverless and communication, GKE scaling and load testing & API Gateway, Transaction Intake, Notification Service \\
 2025H1030060  & Jenil Gandhi & Leaderless replication concept, storage products & DynaStore, Rate Limit Coordinator, Risk Detection \\
 2025H1030049  & Manmay Maheshwari & Stream processing with Flink, observability & Audit Analytics, Fraud Alert, Deposits \\
 \bottomrule

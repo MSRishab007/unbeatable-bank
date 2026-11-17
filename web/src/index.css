@@ -2,75 +2,155 @@
 @import "@fontsource-variable/onest";
 @import "@fontsource-variable/unbounded";
 
-/* Unbeatable Bank: cobalt and volt.
-   Cobalt is the bank (headers, the card, primary actions); volt yellow is the bolt, used
-   only for the mark and moments of "done"; go-green is reserved for money actually moving. */
-:root {
-  --ink: #0d0f2b;
-  --ink-2: #3b3e5c;
-  --muted: #6a6d88;
-  --line: #e3e5f0;
-  --mist: #f3f4fa;
-  --surface: #ffffff;
-  --cobalt: #2d2ae6;
-  --cobalt-deep: #1d1aa8;
-  --cobalt-ink: #12107a;
-  --volt: #ffd23f;
-  --go: #12a663;
-  --go-deep: #0b7a48;
-  --danger: #dc3b45;
-  --warn: #c98a07;
-  --warn-bg: #fff6dd;
-  --good-bg: #e3f6ec;
-  --bad-bg: #fde8ea;
-  --ring: #2d2ae6;
-}
+/* =====================================================================================
+   Unbeatable Bank design tokens.
 
-@theme inline {
-  --color-ink: var(--ink);
-  --color-ink-2: var(--ink-2);
-  --color-muted: var(--muted);
-  --color-line: var(--line);
-  --color-mist: var(--mist);
-  --color-surface: var(--surface);
-  --color-cobalt: var(--cobalt);
-  --color-cobalt-deep: var(--cobalt-deep);
-  --color-cobalt-ink: var(--cobalt-ink);
-  --color-volt: var(--volt);
-  --color-go: var(--go);
-  --color-go-deep: var(--go-deep);
-  --color-danger: var(--danger);
-  --color-warn: var(--warn);
-  --color-warn-bg: var(--warn-bg);
-  --color-good-bg: var(--good-bg);
-  --color-bad-bg: var(--bad-bg);
+   This block is the only place a colour, radius, shadow or timing is written down.
+   Components use the utilities these produce (bg-accent, text-ink, rounded-card,
+   shadow-float, ease-spring ...) and never a raw value. To re-skin the app, edit here.
+
+   Palette "Flare": hot orange and signal yellow on a cool grey base.
+     - Orange is the bank: primary actions, the hero, the active tab.
+     - Yellow is the bolt: the everyday account card and moments of emphasis.
+     - Green means money is moving or has moved. Nothing else is green.
+
+   Contrast (WCAG AA, checked): ink on bg 16.5, muted on bg 5.3, muted on sunken 4.9,
+   accent-ink on accent 6.2, hero-ink on hero 9.2, accent-text on surface 5.7, ink on sun 11.4,
+   pay-ink on pay 4.8, success-text on success-soft 5.7, warn on warn-soft 5.2,
+   danger on surface 5.5, danger on danger-soft 4.6, on-night-muted on night 8.4.
+   Orange (accent) is never used as text on a light surface: use accent-text there.
+   ===================================================================================== */
+@theme {
+  /* Only these colours exist: Tailwind's default palette is switched off. */
+  --color-*: initial;
+
+  --color-bg: #f3f4f7;
+  --color-surface: #ffffff;
+  --color-sunken: #e9ebf0;
+  --color-ink: #0e1330;
+  --color-ink-2: #3a4060;
+  --color-muted: #5e6480;
+  --color-line: #dcdfe8;
+
+  --color-accent: #ff5a1f;
+  --color-accent-hover: #f04a0e;
+  --color-accent-ink: #1a0a02;
+  --color-accent-text: #b93a06;
+  --color-accent-soft: #ffe6da;
+  /* The big orange surfaces (landing hero, sign-in panel): a lighter shade than the action orange. */
+  --color-hero: #ff9a5c;
+  --color-hero-ink: #1a0a02;
+
+  --color-sun: #ffc421;
+  --color-sun-ink: #231a00;
+  --color-sun-soft: #fff0c7;
+
+  --color-pay: #08834a;
+  --color-pay-hover: #076b3a;
+  --color-pay-ink: #ffffff;
+  --color-success: var(--color-pay);
+  --color-success-ink: var(--color-pay-ink);
+  --color-success-text: #076b3a;
+  --color-success-soft: #dcf3e6;
+
+  --color-warn: #8a5a00;
+  --color-warn-soft: var(--color-sun-soft);
+  --color-danger: #c9252f;
+  --color-danger-ink: #ffffff;
+  --color-danger-soft: #fce4e5;
+
+  --color-night: #0e1330;
+  --color-night-2: #1b2146;
+  --color-on-night: #f5f6fa;
+  --color-on-night-muted: #a9afcb;
+
+  /* Type */
   --font-sans: "Onest Variable", ui-sans-serif, system-ui, sans-serif;
   --font-display: "Unbounded Variable", "Onest Variable", ui-sans-serif, sans-serif;
+
+  /* Space: Tailwind's scale is multiples of this; gutter is the page's side padding. */
+  --spacing: 0.25rem;
+  --spacing-gutter: 1rem;
+  --spacing-tabbar: 5.25rem;
+
+  /* Radius: by role, so hierarchy shows in the shape. Buttons and chips are pills. */
+  --radius-*: initial;
+  --radius-chip: 10px;
+  --radius-field: 14px;
   --radius-card: 22px;
+  --radius-panel: 32px;
+
+  /* Shadow: tinted with ink, used only for things that really float. */
+  --shadow-*: initial;
+  --shadow-rise: 0 1px 0 color-mix(in srgb, var(--color-ink) 5%, transparent),
+    0 10px 24px -14px color-mix(in srgb, var(--color-ink) 30%, transparent);
+  --shadow-float: 0 30px 70px -28px color-mix(in srgb, var(--color-ink) 55%, transparent);
+  --shadow-thumb: 0 3px 10px color-mix(in srgb, var(--color-ink) 28%, transparent);
+  --shadow-pay: 0 12px 22px -10px color-mix(in srgb, var(--color-accent) 85%, transparent);
+
+  /* Motion. JS springs that match these live in src/lib/motion.ts. */
+  --ease-*: initial;
+  --ease-out: cubic-bezier(0.2, 0.9, 0.25, 1);
+  --ease-in-out: cubic-bezier(0.6, 0, 0.2, 1);
+  --ease-spring: linear(0, 0.009, 0.035 2.1%, 0.141 4.4%, 0.723 12.9%, 0.938 16.7%, 1.017, 1.077, 1.121, 1.149 24.3%,
+    1.159, 1.163, 1.161, 1.154 29.9%, 1.129 32.8%, 1.051 39.6%, 1.017 43.1%, 0.991, 0.977 51%, 0.974 53.8%,
+    0.975 57.1%, 0.997 69.8%, 1.003 76.9%, 1.004 83.8%, 1);
+  --dur-fast: 140ms;
+  --dur-base: 240ms;
+  --dur-slow: 480ms;
+
+  --animate-sheet-up: sheet-up var(--dur-slow) var(--ease-spring);
+  --animate-pop-in: pop-in var(--dur-base) var(--ease-out);
+  --animate-fade-in: fade-in var(--dur-base) ease-out;
+  --animate-caret: caret 1s steps(2) infinite;
+  --animate-scan: scan 2.2s var(--ease-in-out) infinite;
+  --animate-nudge: nudge 1.4s var(--ease-in-out) infinite;
+
+  @keyframes fade-in { from { opacity: 0; } }
+  @keyframes sheet-up { from { transform: translateY(100%); } }
+  @keyframes pop-in { from { opacity: 0; transform: translate(-50%, -46%) scale(0.96); } }
+  @keyframes caret { 50% { opacity: 0; } }
+  @keyframes scan { 0%, 100% { top: 6%; } 50% { top: 94%; } }
+  @keyframes nudge { 0%, 100% { opacity: 0.35; transform: translateX(0); } 50% { opacity: 1; transform: translateX(3px); } }
 }
 
-html { -webkit-text-size-adjust: 100%; }
-body {
-  background: var(--mist);
-  color: var(--ink);
-  font-family: var(--font-sans);
-  font-feature-settings: "tnum" 1, "cv11" 1;
-  -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
-}
-::selection { background: var(--volt); color: var(--ink); }
-:focus-visible { outline: 2.5px solid var(--ring); outline-offset: 2px; }
-button { cursor: pointer; }
-button:disabled { cursor: not-allowed; }
+@utility duration-fast { transition-duration: var(--dur-fast); }
+@utility duration-base { transition-duration: var(--dur-base); }
+@utility duration-slow { transition-duration: var(--dur-slow); }
 
-.num { font-variant-numeric: tabular-nums; }
+/* Press feedback for anything tappable: a quick squeeze that springs back. */
+@utility press {
+  transition: transform var(--dur-base) var(--ease-spring), background-color var(--dur-fast), color var(--dur-fast),
+    border-color var(--dur-fast), box-shadow var(--dur-fast);
+  &:active:not(:disabled) { transform: scale(0.96); transition-duration: var(--dur-fast); }
+}
+@utility press-row {
+  transition: transform var(--dur-base) var(--ease-spring), background-color var(--dur-fast);
+  &:active { transform: scale(0.985); transition-duration: var(--dur-fast); }
+}
+@utility num { font-variant-numeric: tabular-nums; }
+@utility no-scrollbar { scrollbar-width: none; &::-webkit-scrollbar { display: none; } }
+
+/* In the base layer so utilities (focus-visible:outline-none on fields, for one) can override them. */
+@layer base {
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    background: var(--color-bg);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-feature-settings: "tnum" 1, "cv11" 1;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow-x: clip;
+  }
+  ::selection { background: var(--color-sun); color: var(--color-sun-ink); }
+  :focus-visible { outline: 2.5px solid var(--color-ink); outline-offset: 2px; border-radius: 4px; }
+  .on-dark :focus-visible, .on-dark:focus-visible { outline-color: var(--color-on-night); }
+  button, [role="tab"], summary { cursor: pointer; }
+  button:disabled { cursor: not-allowed; }
+  input[type="range"] { accent-color: var(--color-accent); }
+}
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+  *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
 }
-
-@keyframes fade-in { from { opacity: 0; } }
-@keyframes sheet-up { from { transform: translateY(100%); } }
-@keyframes pop-in { from { opacity: 0; transform: translate(-50%, -48%) scale(.97); } }
-@keyframes caret { 50% { opacity: 0; } }
-@keyframes shimmer { from { background-position: -200% 0; } to { background-position: 200% 0; } }

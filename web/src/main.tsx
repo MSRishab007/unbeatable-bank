@@ -45,7 +45,12 @@ function ToClassic() {
   return null;
 }
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
+async function boot() {
+  // Demo mode (`npm run demo`, or VITE_MOCK=1) answers /api from src/mocks instead of a real
+  // backend. The flag is a constant at build time and is never set for `npm run build`, so the
+  // bundle the gateway serves does not contain the mocks.
+  if (import.meta.env.VITE_MOCK === "1") (await import("./mocks/install")).installMockBank();
+  ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
       <MotionConfig reducedMotion="user">
@@ -71,8 +76,10 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
           </Routes>
           <Prompts />
         </HashRouter>
-        <Toaster position="top-center" richColors closeButton toastOptions={{ style: { fontFamily: "var(--font-sans)", borderRadius: 18 } }} />
+        <Toaster position="top-center" richColors closeButton toastOptions={{ style: { fontFamily: "var(--font-sans)", borderRadius: "var(--radius-card)" } }} />
       </MotionConfig>
     </QueryClientProvider>
-  </React.StrictMode>,
-);
+    </React.StrictMode>,
+  );
+}
+boot();

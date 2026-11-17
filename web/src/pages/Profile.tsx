@@ -15,7 +15,7 @@ import { api, get } from "@/lib/api";
 import { lockNow, signOut } from "@/lib/auth";
 import { queryClient, useMe, usePins } from "@/lib/query";
 import { askSetPin, PIN_LEN, type PinKind } from "@/lib/session";
-import { copyText, inr, when, words } from "@/lib/utils";
+import { cn, copyText, inr, when, words } from "@/lib/utils";
 
 const KYC_TYPES = ["image/jpeg", "image/png", "application/pdf"];
 
@@ -130,8 +130,8 @@ function BlockEverything({ open, onOpenChange }: { open: boolean; onOpenChange: 
   return (
     <Modal open={open} onOpenChange={onOpenChange} title="Block everything?"
       description="Every account is frozen at once, every device is signed out, including this one, and a fraud officer is told. Money can still come in. Unfreezing needs the bank to speak to you.">
-      <label className="flex items-center gap-3 rounded-2xl bg-mist p-4 text-[15px] font-medium">
-        <input type="checkbox" checked={sure} onChange={(e) => setSure(e.target.checked)} className="size-5 accent-[var(--danger)]" />
+      <label className="flex cursor-pointer items-center gap-3 rounded-field bg-bg p-4 text-[15px] font-medium">
+        <input type="checkbox" checked={sure} onChange={(e) => setSure(e.target.checked)} className="size-5 accent-danger" />
         I think someone else has got into my account
       </label>
       <Button variant="danger" size="lg" className="mt-5 w-full" disabled={!sure || busy} onClick={async () => {
@@ -167,7 +167,7 @@ function Documents() {
             toast.success("Sent for review"); q.refetch(); queryClient.invalidateQueries({ queryKey: ["me"] });
           } catch (ex) { toast.error((ex as Error).message); }
         }} />
-      <ul className="divide-y divide-line/70">
+      <ul className="divide-y divide-line">
         {q.data.types.map((t: any) => {
           const doc = t.document;
           const label = t.label[0].toUpperCase() + t.label.slice(1);
@@ -225,7 +225,7 @@ export default function Profile() {
           <div className="min-w-0 flex-1">
             <p className="font-display text-xl font-semibold tracking-tight">{m.full_name}</p>
             <p className="text-[13px] text-muted">Customer number <b className="text-ink-2 num">{m.cif_number}</b></p>
-            <button type="button" className="mt-1 inline-flex items-center gap-1 text-[13px] font-semibold text-cobalt" onClick={async () => { if (await copyText(m.customer_id)) toast.success("Customer ID copied"); }}>
+            <button type="button" className="press mt-1 inline-flex items-center gap-1 rounded-full text-[13px] font-semibold text-accent-text hover:underline" onClick={async () => { if (await copyText(m.customer_id)) toast.success("Customer ID copied"); }}>
               Copy customer ID <Copy className="size-3.5" />
             </button>
           </div>
@@ -233,33 +233,35 @@ export default function Profile() {
         </Card>
       ) : <Skeleton className="h-28" />}
 
+      <div className="items-start gap-10 lg:grid lg:grid-cols-2">
+      <div className="min-w-0">
       <Section title="PINs">
-        <div id="pins" className="grid gap-3 sm:grid-cols-2">
+        <Card id="pins" className="grid divide-y divide-line sm:grid-cols-2 sm:divide-x sm:divide-y-0">
           {(["PAYMENT", "APP"] as const).map((k) => {
             const st = pins.data?.[k];
             return (
-              <Card key={k} data-pin={k} className="p-5">
-                <div className="flex items-start justify-between gap-3">
-                  <span className="flex size-11 items-center justify-center rounded-2xl bg-cobalt/8 text-cobalt"><KeyRound className="size-5" /></span>
+              <div key={k} data-pin={k} className="p-5">
+                <div className="flex items-center justify-between gap-3">
+                  <span aria-hidden className="flex gap-1">{Array.from({ length: PIN_LEN[k] }, (_, i) => <span key={i} className={cn("size-2.5 rounded-full", st?.set ? "bg-ink" : "bg-line")} />)}</span>
                   {st && (!st.set ? <Badge tone="warn">Not set</Badge> : st.locked ? <Badge tone="bad">Locked until {when(st.locked_until)}</Badge> : <Badge tone="good">Set</Badge>)}
                 </div>
-                <p className="mt-4 font-semibold">{k === "PAYMENT" ? "Payment PIN" : "App PIN"} <span className="font-normal text-muted">· {PIN_LEN[k]} digits</span></p>
+                <p className="mt-4 font-semibold">{k === "PAYMENT" ? "Payment PIN" : "App PIN"}<span className="font-normal text-muted">, {PIN_LEN[k]} digits</span></p>
                 <p className="text-[13px] text-muted">{k === "PAYMENT" ? "Approves money leaving your account." : "Unlocks the app and approves deposits."}</p>
                 <div className="mt-4 flex gap-2">
                   {st && !st.set && <Button size="sm" onClick={() => askSetPin(k).then(() => pins.refetch(), () => {})}>Set</Button>}
                   {st?.set && !st.locked && <Button size="sm" variant="secondary" onClick={() => askSetPin(k, undefined, true).then(() => pins.refetch(), () => {})}>Change</Button>}
-                  {st?.set && <Button size="sm" variant="ghost" onClick={() => setReset(k)}>{st.locked ? "Reset to unlock" : "Forgot"}</Button>}
+                  {st?.set && <Button size="sm" variant="ghost" onClick={() => setReset(k)}>{st.locked ? "Reset to unlock" : "Forgot it"}</Button>}
                 </div>
-              </Card>
+              </div>
             );
           })}
-        </div>
+        </Card>
         <p className="mt-3 text-[13px] text-muted">Three wrong tries lock a PIN for 24 hours and we tell you. We never ask for your PIN by phone, email or message.</p>
       </Section>
 
       <Section title="Sign-in details">
         <Card className="overflow-hidden">
-          <ul className="divide-y divide-line/70">
+          <ul className="divide-y divide-line">
             {[
               { icon: Mail, k: "Email", v: m?.email, act: () => setContact("email") },
               { icon: Phone, k: "Mobile", v: m?.phone, act: () => setContact("phone") },
@@ -281,10 +283,12 @@ export default function Profile() {
         <p className="mt-3 text-[13px] text-muted">Only KYC officers can open these, and every time one does it is recorded.</p>
       </Section>
 
+      </div>
+      <div className="min-w-0">
       <Section title="Signed in now">
         <Card className="overflow-hidden" id="sessions">
           {sec.data ? (
-            <ul className="divide-y divide-line/70">
+            <ul className="divide-y divide-line">
               {sec.data.sessions.map((x: any) => (
                 <li key={x.session_id} className="flex items-center gap-3.5 px-5 py-4">
                   {/Android|iOS/.test(deviceName[x.device_id] || "") ? <Smartphone className="size-5 text-muted" /> : <Monitor className="size-5 text-muted" />}
@@ -306,7 +310,7 @@ export default function Profile() {
 
       <Section title="Recent sign-ins">
         <Card className="overflow-hidden">
-          <ul className="divide-y divide-line/70">
+          <ul className="divide-y divide-line">
             {(sec.data?.logins || []).slice(0, 8).map((l: any, i: number) => (
               <li key={i} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-5 py-3 text-[15px]">
                 <span className="w-36 shrink-0 text-muted">{when(l.at)}</span>
@@ -321,7 +325,7 @@ export default function Profile() {
       </Section>
 
       <Section title="Something wrong?">
-        <div className="flex flex-col gap-4 rounded-[var(--radius-card)] border border-danger/25 bg-bad-bg/50 p-5 sm:flex-row sm:items-center">
+        <div className="flex flex-col gap-4 rounded-card bg-danger-soft p-5 sm:flex-row sm:items-center">
           <ShieldAlert className="size-8 shrink-0 text-danger" />
           <div className="flex-1">
             <p className="font-semibold">Block everything</p>
@@ -330,6 +334,9 @@ export default function Profile() {
           <Button variant="danger" id="block-everything" onClick={() => setBlock(true)}>Block everything</Button>
         </div>
       </Section>
+
+      </div>
+      </div>
 
       <ResetPin kind={reset} onClose={() => { setReset(null); pins.refetch(); }} />
       <ChangeContact field={contact} current={contact === "email" ? m?.email || "" : m?.phone || ""} onClose={() => setContact(null)} />

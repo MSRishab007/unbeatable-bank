@@ -2,8 +2,6 @@ import os
 
 from psycopg_pool import ConnectionPool
 
-from ubcommon.dbpool import pool_options
-
 _pool: ConnectionPool | None = None
 
 
@@ -14,7 +12,7 @@ def init_pool() -> ConnectionPool:
             conninfo=os.environ["DATABASE_URL"],
             min_size=int(os.getenv("DB_POOL_MIN", "1")),
             max_size=int(os.getenv("DB_POOL_MAX", "5")),  # keep small: Cloud SQL micro has ~25 connections
-            **pool_options(),
+            kwargs={"autocommit": True},
             open=True,
         )
     return _pool

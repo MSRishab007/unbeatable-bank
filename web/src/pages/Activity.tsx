@@ -1,4 +1,6 @@
 import { useMemo, useState } from "react";
+import { motion } from "motion/react";
+import { spring } from "@/lib/motion";
 import { Empty, PageHead } from "@/components/AppShell";
 import { PaymentRow, PaymentSheet } from "@/components/Payment";
 import { Card, Skeleton } from "@/components/ui/card";
@@ -24,24 +26,25 @@ export default function Activity() {
   return (
     <div>
       <PageHead title="Activity" lead={q.data?.length ? <>You've sent <b className="text-ink num">{inr(spent)}</b> across your last {q.data.length} payments.</> : undefined} />
-      <div className="mb-5 flex gap-2 overflow-x-auto [scrollbar-width:none]" role="tablist">
+      <div className="mb-5 flex gap-1 overflow-x-auto rounded-full bg-surface p-1 no-scrollbar sm:inline-flex" role="tablist" aria-label="Filter payments">
         {FILTERS.map(([k, label]) => (
           <button key={k} role="tab" aria-selected={filter === k} type="button" onClick={() => setFilter(k)}
-            className={cn("shrink-0 rounded-full px-4 py-2 text-sm font-semibold transition-colors", filter === k ? "bg-ink text-white" : "bg-surface text-ink-2 border border-line hover:border-ink/20")}>
-            {label}
+            className={cn("press relative shrink-0 grow rounded-full px-4 py-2 text-sm font-semibold transition-colors duration-fast", filter === k ? "text-on-night" : "text-ink-2 hover:text-ink")}>
+            {filter === k && <motion.span layoutId="activity-pill" className="absolute inset-0 rounded-full bg-night" transition={spring.snappy} />}
+            <span className="relative">{label}</span>
           </button>
         ))}
       </div>
-      {q.isLoading ? <Skeleton className="h-96" /> : groups.length ? (
-        <div className="space-y-6">
+      {q.isLoading ? <Skeleton className="h-96 rounded-card" /> : groups.length ? (
+        <motion.div key={filter} className="space-y-6 lg:max-w-3xl" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={spring.page}>
           {groups.map(([d, ps]) => (
             <div key={d}>
-              <p className="mb-2 px-1 text-xs font-semibold tracking-wide text-muted">{d}</p>
-              <Card className="overflow-hidden"><ul className="divide-y divide-line/70">{ps.map((p) => <PaymentRow key={p.txn_id} p={p} onOpen={setOpened} />)}</ul></Card>
+              <p className="mb-2 px-1 text-[13px] font-semibold text-muted">{d}</p>
+              <Card className="overflow-hidden"><ul className="divide-y divide-line">{ps.map((p) => <PaymentRow key={p.txn_id} p={p} onOpen={setOpened} />)}</ul></Card>
             </div>
           ))}
-        </div>
-      ) : <Empty title="Nothing here" text="Payments you make show up here, with the checks each one went through." />}
+        </motion.div>
+      ) : <Empty title={filter === "all" ? "No payments yet" : "No payments match this filter"} text="Payments you make show up here, with the checks each one went through." />}
       <PaymentSheet p={opened} onClose={() => setOpened(null)} />
     </div>
   );

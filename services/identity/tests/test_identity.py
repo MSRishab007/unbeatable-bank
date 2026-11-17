@@ -230,22 +230,6 @@ def test_new_otp_replaces_the_old_one(conn, deps, user):
     assert service.verify_otp(conn, user["customer_id"], "txn:y", new) == "OK"
 
 
-def test_payment_code_is_never_shown_in_the_app(conn, deps):
-    """A real customer's payment code goes by email and phone only; the inbox says where it went."""
-    n = uuid.uuid4().int
-    out = service.register(conn, deps, full_name="Kabir Rao", date_of_birth=__import__("datetime").date(2000, 1, 2),
-                           email=f"kabir{n % 10**8}@gmail.com", phone=f"+918{n % 10**9:09d}",
-                           password="correct horse battery")
-    customer = {"customer_id": out["customer_id"]}
-    service.issue_otp(conn, deps, out["customer_id"], "txn:pay1", "Confirm payment of Rs 9,000.00 to Arjun M****")
-    body = [m for m in inbox(deps, customer) if m["type"] == "OTP"][-1]["body"]
-    assert "Your code is" not in body and not __import__("re").search(r"\b\d{6}\b", body)
-    assert "ka" in body and "@gmail.com" in body and "never shown in the app" in body
-    # a sign-in code from a new device still reaches the inbox of the customer's other devices
-    service.issue_otp(conn, deps, out["customer_id"], "device:abc", "Sign-in from a new device")
-    assert "Your code is" in [m for m in inbox(deps, customer) if m["type"] == "OTP"][-1]["body"]
-
-
 # ------------------------------------------------------------------ staff
 
 

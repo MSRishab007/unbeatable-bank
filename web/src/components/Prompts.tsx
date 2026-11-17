@@ -8,6 +8,7 @@ import { InputOTP, InputOTPGroup, InputOTPSlot } from "./ui/input-otp";
 import { Button } from "./ui/button";
 import { Field, Input } from "./ui/input";
 import { Mark } from "./Logo";
+import { haptic, spring } from "@/lib/motion";
 import { api, ApiError } from "@/lib/api";
 import { Cancelled, PIN_LEN, PIN_NAME, usePrompts, useSession, type PinKind } from "@/lib/session";
 import { signOut } from "@/lib/auth";
@@ -17,36 +18,38 @@ const PIN_USE: Record<PinKind, string> = {
   APP: "Your 4-digit app PIN unlocks the app and approves deposits.",
 };
 
-export function PinBoxes({ kind, value, onChange, onComplete, invalid, autoFocus = true, mask = true, id }: {
+/**
+ * Segmented boxes for a PIN or a one-time code (the input-otp package: one real input, so
+ * paste, auto-advance and SMS autofill work). Bump `shake` to shake it after a wrong entry.
+ */
+export function PinBoxes({ kind, value, onChange, onComplete, invalid, autoFocus = true, mask = true, id, name, shake = 0 }: {
   kind: PinKind | "OTP"; value: string; onChange: (v: string) => void; onComplete?: (v: string) => void;
-  invalid?: boolean; autoFocus?: boolean; mask?: boolean; id?: string;
+  invalid?: boolean; autoFocus?: boolean; mask?: boolean; id?: string; name?: string; shake?: number;
 }) {
   const n = kind === "OTP" ? 6 : PIN_LEN[kind];
+  useEffect(() => {
+    if (shake) haptic([20, 30, 20]);
+  }, [shake]);
   return (
-    <InputOTP
-      id={id}
-      maxLength={n}
-      value={value}
-      onChange={onChange}
-      onComplete={onComplete}
-      autoFocus={autoFocus}
-      inputMode="numeric"
-      pattern="^[0-9]*$"
-      autoComplete={kind === "OTP" ? "one-time-code" : "off"}
-      aria-label={kind === "OTP" ? "6-digit code" : PIN_NAME[kind]}
-      containerClassName="justify-center"
-    >
-      <InputOTPGroup>
-        {Array.from({ length: n }, (_, i) => <InputOTPSlot key={i} index={i} mask={mask} invalid={invalid} />)}
-      </InputOTPGroup>
-    </InputOTP>
-  );
-}
-
-function Shake({ on, children }: { on: number; children: React.ReactNode }) {
-  return (
-    <motion.div key={on} animate={on ? { x: [0, -10, 10, -6, 6, 0] } : {}} transition={{ duration: 0.35 }}>
-      {children}
+    <motion.div key={shake} animate={shake ? { x: [0, -12, 12, -8, 8, -4, 0] } : undefined} transition={{ duration: 0.4 }}>
+      <InputOTP
+        id={id}
+        name={name}
+        maxLength={n}
+        value={value}
+        onChange={onChange}
+        onComplete={onComplete}
+        autoFocus={autoFocus}
+        inputMode="numeric"
+        pattern="^[0-9]*$"
+        autoComplete={kind === "OTP" ? "one-time-code" : "off"}
+        aria-label={kind === "OTP" ? "6-digit code" : PIN_NAME[kind]}
+        containerClassName="justify-center"
+      >
+        <InputOTPGroup>
+          {Array.from({ length: n }, (_, i) => <InputOTPSlot key={i} index={i} mask={mask} invalid={invalid} />)}
+        </InputOTPGroup>
+      </InputOTP>
     </motion.div>
   );
 }
@@ -80,14 +83,12 @@ function PinSheet() {
         }}
         className="space-y-5"
       >
-        <Shake on={shake}>
-          <PinBoxes kind={req.kind} value={value} onChange={setValue} onComplete={(v) => setTimeout(() => close(v), 120)} invalid={!!req.problem && !value} />
-        </Shake>
-        {req.problem && <p role="alert" className="text-center text-sm text-danger">{req.problem}</p>}
+        <PinBoxes kind={req.kind} value={value} onChange={setValue} onComplete={(v) => setTimeout(() => close(v), 160)} invalid={!!req.problem && !value} shake={shake} />
+        {req.problem && <p role="alert" className="text-center text-sm font-medium text-danger">{req.problem}</p>}
         <Button type="submit" className="w-full" size="lg" disabled={value.length !== PIN_LEN[req.kind]}>Confirm</Button>
         <p className="text-center text-sm text-muted">
           Forgot it?{" "}
-          <Link to="/profile" className="font-semibold text-cobalt" onClick={() => close()}>Reset it in Profile</Link>
+          <Link to="/profile" className="font-semibold text-accent-text underline underline-offset-2" onClick={() => close()}>Reset it in Profile</Link>
         </p>
       </form>
     </Modal>
@@ -157,7 +158,7 @@ function SetPinSheet() {
           {req.kind === "APP" ? "It can't be the first or last four digits of your payment PIN. Avoid 1234 or 1111."
             : "Your app PIN can't be its first or last four digits. Avoid 123456 or 111111."}
         </p>
-        {error && <p role="alert" className="text-sm text-danger">{error}</p>}
+        {error && <p role="alert" className="text-sm font-medium text-danger">{error}</p>}
         <Button type="submit" size="lg" className="w-full" disabled={busy || !secret || stage !== 1 || again.length !== n}>Save PIN</Button>
       </form>
     </Modal>
@@ -210,34 +211,33 @@ function LockScreen() {
   }
 
   return (
-    <div role="dialog" aria-modal="true" aria-labelledby="lock-title" className="fixed inset-0 z-[60] flex items-center justify-center bg-cobalt p-5 text-white">
-      <div aria-hidden className="pointer-events-none absolute inset-0 opacity-[0.14] [background-image:radial-gradient(rgba(255,255,255,.9)_1px,transparent_1px)] [background-size:22px_22px]" />
-      <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} className="relative w-full max-w-sm text-center">
-        <Mark className="mx-auto size-16" bg="#fff" u="var(--cobalt)" />
-        <h2 id="lock-title" className="mt-6 font-display text-2xl font-semibold">Welcome back{session?.name ? `, ${session.name.split(" ")[0]}` : ""}</h2>
-        <p className="mt-2 text-white/70">
-          <Lock className="mr-1 inline size-4 -translate-y-px" />
+    <div role="dialog" aria-modal="true" aria-labelledby="lock-title" className="on-dark fixed inset-0 z-[60] flex items-center justify-center bg-night p-5 text-on-night">
+      <motion.div initial={{ opacity: 0, y: 24, scale: 0.96 }} animate={{ opacity: 1, y: 0, scale: 1 }} transition={spring.page} className="w-full max-w-sm text-center">
+        <span className="relative mx-auto flex size-20 items-center justify-center">
+          <Mark className="size-20" tone="accent" draw />
+          <span className="absolute -right-2 -bottom-2 flex size-8 items-center justify-center rounded-full bg-sun text-sun-ink"><Lock className="size-4" strokeWidth={2.5} /></span>
+        </span>
+        <h2 id="lock-title" className="mt-7 font-display text-2xl font-semibold tracking-tight">Welcome back{session?.name ? `, ${session.name.split(" ")[0]}` : ""}</h2>
+        <p className="mt-2 text-on-night-muted">
           We locked the app after 5 minutes without use. {usePassword ? "Enter your password." : "Enter your app PIN."}
         </p>
         <form className="mt-8 space-y-4" onSubmit={(e) => { e.preventDefault(); if (value) unlock(value); }}>
           {usePassword ? (
             <>
               <Input ref={pw} type="password" autoComplete="current-password" autoFocus aria-label="Password" value={value}
-                onChange={(e) => setValue(e.target.value)} className="border-white/20 bg-white/10 text-white placeholder:text-white/50 focus:border-white focus:ring-white/20" placeholder="Password" />
-              <Button type="submit" variant="volt" size="lg" className="w-full" disabled={busy || !value}>Unlock</Button>
+                onChange={(e) => setValue(e.target.value)} placeholder="Password" />
+              <Button type="submit" variant="sun" size="lg" className="w-full" disabled={busy || !value}>Unlock</Button>
             </>
           ) : (
-            <Shake on={shake}>
-              <PinBoxes kind="APP" value={value} onChange={setValue} onComplete={(v) => unlock(v)} invalid={!!problem} />
-            </Shake>
+            <PinBoxes kind="APP" value={value} onChange={setValue} onComplete={(v) => unlock(v)} invalid={!!problem && !value} shake={shake} />
           )}
-          {problem && <p role="alert" className="text-sm font-medium text-volt">{problem}</p>}
+          {problem && <p role="alert" className="text-sm font-semibold text-sun">{problem}</p>}
         </form>
         <div className="mt-8 flex justify-center gap-6 text-sm">
-          <button type="button" className="font-semibold text-white/85 hover:text-white" onClick={() => { setUsePassword(!usePassword); setValue(""); setProblem(""); }}>
+          <button type="button" className="press rounded-full font-semibold text-on-night underline underline-offset-4" onClick={() => { setUsePassword(!usePassword); setValue(""); setProblem(""); }}>
             {usePassword ? "Use my app PIN" : "Use my password instead"}
           </button>
-          <button type="button" className="font-semibold text-white/85 hover:text-white" onClick={() => { usePrompts.setState({ lock: null }); req.reject(new Cancelled()); signOut(); }}>
+          <button type="button" className="press rounded-full font-semibold text-on-night underline underline-offset-4" onClick={() => { usePrompts.setState({ lock: null }); req.reject(new Cancelled()); signOut(); }}>
             Sign out
           </button>
         </div>

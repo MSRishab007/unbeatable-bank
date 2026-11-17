@@ -10,20 +10,20 @@ import { Modal } from "@/components/ui/dialog";
 import { PinBoxes } from "@/components/Prompts";
 import { api } from "@/lib/api";
 import { finishSignIn, login, verifyDevice, type DeviceChallenge } from "@/lib/auth";
+import { spring } from "@/lib/motion";
 import { normaliseIdentifier } from "@/lib/utils";
 
 function AuthFrame({ children, aside }: { children: React.ReactNode; aside: React.ReactNode }) {
   return (
-    <div className="grid min-h-dvh lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
-      <aside className="relative hidden overflow-hidden bg-cobalt p-12 text-white lg:flex lg:flex-col lg:justify-between">
-        <div aria-hidden className="pointer-events-none absolute inset-0 opacity-[0.14] [background-image:radial-gradient(rgba(255,255,255,.9)_1px,transparent_1px)] [background-size:22px_22px]" />
-        <Link to="/" className="relative"><Logo tone="light" /></Link>
-        <div className="relative">{aside}</div>
-        <Mark tile={false} title={null} crop className="pointer-events-none absolute -right-16 -bottom-24 h-[420px] w-auto opacity-[0.12]" />
+    <div className="grid min-h-dvh bg-surface lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
+      <aside className="relative hidden overflow-hidden bg-hero p-12 text-hero-ink lg:flex lg:flex-col lg:justify-between">
+        <Link to="/" className="relative self-start rounded-chip"><Logo tone="dark" on="hero" /></Link>
+        <motion.div className="relative" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring.page, delay: 0.1 }}>{aside}</motion.div>
+        <Mark variant="bare" title={null} draw className="pointer-events-none absolute -top-10 -right-24 size-[560px] opacity-15" />
       </aside>
-      <main className="flex flex-col px-5 py-6 sm:px-10 lg:justify-center lg:px-16">
+      <main className="flex flex-col px-5 py-5 sm:px-10 lg:justify-center lg:px-16">
         <div className="mb-10 flex items-center justify-between lg:hidden">
-          <Link to="/"><Logo /></Link>
+          <Link to="/" className="rounded-chip"><Logo short /></Link>
         </div>
         <div className="mx-auto w-full max-w-[420px]">{children}</div>
       </main>
@@ -56,7 +56,7 @@ function ForgotPassword({ open, onOpenChange }: { open: boolean; onOpenChange: (
           <Field label="Email or mobile number" htmlFor="fp-id">
             <Input id="fp-id" autoComplete="username" required value={identifier} onChange={(e) => setIdentifier(e.target.value)} autoFocus />
           </Field>
-          {error && <p role="alert" className="text-sm text-danger">{error}</p>}
+          {error && <p role="alert" className="text-sm font-medium text-danger">{error}</p>}
           <Button type="submit" size="lg" className="w-full" disabled={busy}>Send me a code</Button>
         </form>
       ) : (
@@ -70,7 +70,7 @@ function ForgotPassword({ open, onOpenChange }: { open: boolean; onOpenChange: (
           <Field label="New password" hint="At least 8 characters." htmlFor="fp-pw">
             <Input id="fp-pw" type="password" autoComplete="new-password" minLength={8} required value={pw} onChange={(e) => setPw(e.target.value)} />
           </Field>
-          {error && <p role="alert" className="text-sm text-danger">{error}</p>}
+          {error && <p role="alert" className="text-sm font-medium text-danger">{error}</p>}
           <Button type="submit" size="lg" className="w-full" disabled={busy || code.length !== 6}>Save new password</Button>
         </form>
       )}
@@ -84,6 +84,7 @@ function DeviceCode({ challenge, identifier, onBack, onDone }: {
   const [code, setCode] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [shake, setShake] = useState(0);
   const [forgot, setForgot] = useState(false);
   async function submit(value = code) {
     if (busy || value.length !== 6) return;
@@ -93,27 +94,27 @@ function DeviceCode({ challenge, identifier, onBack, onDone }: {
       await finishSignIn(t, identifier);
       onDone();
     } catch (e) {
-      setError((e as Error).message); setCode("");
+      setError((e as Error).message); setCode(""); setShake((n) => n + 1);
     } finally { setBusy(false); }
   }
   return (
-    <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}>
-      <button type="button" onClick={onBack} className="mb-8 inline-flex items-center gap-1.5 text-sm font-semibold text-muted hover:text-ink">
+    <motion.div initial={{ opacity: 0, x: 32 }} animate={{ opacity: 1, x: 0 }} transition={spring.page}>
+      <button type="button" onClick={onBack} className="press mb-8 inline-flex items-center gap-1.5 rounded-full text-sm font-semibold text-muted hover:text-ink">
         <ArrowLeft className="size-4" /> Back
       </button>
-      <span className="flex size-14 items-center justify-center rounded-2xl bg-cobalt/10 text-cobalt"><MailCheck className="size-7" /></span>
+      <span className="flex size-14 items-center justify-center rounded-full bg-sun text-sun-ink"><MailCheck className="size-7" /></span>
       <h1 className="mt-6 font-display text-[28px] font-semibold tracking-tight">Is this you?</h1>
       <p className="mt-2 text-[15px] leading-relaxed text-muted">
         This is the first time you've signed in on this device. {challenge.message || "We sent you a code."} It expires in 5 minutes.
       </p>
       <form id="device-code" className="mt-8 space-y-5" onSubmit={(e) => { e.preventDefault(); submit(); }}>
-        <PinBoxes kind="OTP" mask={false} value={code} onChange={setCode} onComplete={(v) => submit(v)} invalid={!!error} />
-        {error && <p role="alert" className="text-center text-sm text-danger">{error}</p>}
+        <PinBoxes kind="OTP" mask={false} value={code} onChange={setCode} onComplete={(v) => submit(v)} invalid={!!error && !code} shake={shake} />
+        {error && <p role="alert" className="text-center text-sm font-medium text-danger">{error}</p>}
         <Button type="submit" size="lg" className="w-full" disabled={busy || code.length !== 6}>Confirm and sign in</Button>
       </form>
       <p className="mt-8 text-sm text-muted">
         Didn't ask for this? Someone has your password:{" "}
-        <button type="button" className="font-semibold text-cobalt" onClick={() => setForgot(true)}>reset it now</button>.
+        <button type="button" className="font-semibold text-accent-text underline underline-offset-2" onClick={() => setForgot(true)}>reset it now</button>.
       </p>
       <ForgotPassword open={forgot} onOpenChange={setForgot} />
     </motion.div>
@@ -143,29 +144,29 @@ export function SignIn() {
   }
 
   return (
-    <AuthFrame aside={<><p className="font-display text-4xl font-semibold leading-tight tracking-tight">Good to see you again.</p>
-      <p className="mt-4 max-w-sm text-white/70">New device? We'll send a code to the phone and email you registered, before anything else.</p></>}>
+    <AuthFrame aside={<><p className="max-w-md font-display text-[42px] font-semibold leading-[1.05] tracking-[-0.04em]">Good to see you again.</p>
+      <p className="mt-4 max-w-sm text-lg">New device? We'll send a code to the phone and email you registered, before anything else.</p></>}>
         {challenge ? (
           <DeviceCode key="code" challenge={challenge.c} identifier={challenge.id} onBack={() => setChallenge(null)} onDone={done} />
         ) : (
-          <motion.div key="form" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+          <motion.div key="form" initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={spring.page}>
             <h1 className="font-display text-[32px] font-semibold tracking-tight">Sign in</h1>
             <p className="mt-2 text-muted">Use the email or mobile number you registered with.</p>
             <form className="mt-8 space-y-5" onSubmit={submit}>
               <Field label="Email or mobile number" htmlFor="identifier">
                 <Input id="identifier" name="identifier" autoComplete="username" required value={identifier} onChange={(e) => setIdentifier(e.target.value)} autoFocus />
               </Field>
-              <Field label={<span className="flex justify-between">Password<button type="button" className="font-semibold text-cobalt" onClick={() => setForgot(true)}>Forgot?</button></span>} htmlFor="password">
+              <Field label={<span className="flex justify-between">Password<button type="button" className="font-semibold text-accent-text underline underline-offset-2" onClick={() => setForgot(true)}>Forgot?</button></span>} htmlFor="password">
                 <Input id="password" name="password" type="password" autoComplete="current-password" required value={password} onChange={(e) => setPassword(e.target.value)} />
               </Field>
-              {error && <p role="alert" className="text-sm text-danger">{error}</p>}
+              {error && <p role="alert" className="text-sm font-medium text-danger">{error}</p>}
               <Button type="submit" size="lg" className="w-full" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</Button>
             </form>
             <p className="mt-8 text-center text-[15px] text-muted">
-              New here? <Link to="/register" className="font-semibold text-cobalt">Open an account</Link>
+              New here? <Link to="/register" className="font-semibold text-accent-text underline underline-offset-2">Open an account</Link>
             </p>
             <p className="mt-3 text-center text-sm text-muted">
-              Bank staff? <a href="/classic/#/staff" className="font-semibold text-ink-2 hover:text-ink">Staff console</a>
+              Bank staff? <a href="/classic/#/staff" className="font-semibold text-ink-2 underline underline-offset-2 hover:text-ink">Open the staff console</a>
             </p>
           </motion.div>
         )}
@@ -197,12 +198,12 @@ export function Register() {
   }
 
   return (
-    <AuthFrame aside={<><p className="font-display text-4xl font-semibold leading-tight tracking-tight">Two minutes to sign up. Six checks on every payment after that.</p>
-      <p className="mt-4 max-w-sm text-white/70">A branch officer verifies your KYC before money can move. You can open accounts straight away.</p></>}>
+    <AuthFrame aside={<><p className="max-w-md font-display text-[42px] font-semibold leading-[1.05] tracking-[-0.04em]">Two minutes to sign up. Six checks on every payment after that.</p>
+      <p className="mt-4 max-w-sm text-lg">A branch officer verifies your KYC before money can move. You can open accounts straight away.</p></>}>
       {challenge ? (
         <DeviceCode challenge={challenge.c} identifier={challenge.id} onBack={() => setChallenge(null)} onDone={() => nav("/home", { replace: true })} />
       ) : (
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+        <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={spring.page}>
           <h1 className="font-display text-[32px] font-semibold tracking-tight">Open your account</h1>
           <p className="mt-2 text-muted">Create a login first. It takes about two minutes.</p>
           <form className="mt-8 space-y-5" onSubmit={submit}>
@@ -215,7 +216,7 @@ export function Register() {
               </Field>
               <Field label="Mobile number" htmlFor="phone">
                 <div className="relative">
-                  <span className="pointer-events-none absolute top-1/2 left-4 -translate-y-1/2 text-[15px] text-muted">+91</span>
+                  <span className="pointer-events-none absolute top-1/2 left-4 z-10 -translate-y-1/2 text-[15px] text-muted">+91</span>
                   <Input id="phone" name="phone" inputMode="numeric" autoComplete="tel-national" required pattern="[6-9][0-9]{9}"
                     title="10-digit Indian mobile number" placeholder="10 digits" className="pl-12" value={v.phone} onChange={set("phone")} />
                 </div>
@@ -230,11 +231,11 @@ export function Register() {
             <Field label="Password" hint="At least 8 characters." htmlFor="new-password">
               <Input id="new-password" name="password" type="password" autoComplete="new-password" required minLength={8} value={v.password} onChange={set("password")} />
             </Field>
-            {error && <p role="alert" className="text-sm text-danger">{error}</p>}
+            {error && <p role="alert" className="text-sm font-medium text-danger">{error}</p>}
             <Button type="submit" size="lg" className="w-full" disabled={busy}>{busy ? "Creating…" : "Create my login"}</Button>
           </form>
           <p className="mt-8 text-center text-[15px] text-muted">
-            Already with us? <Link to="/signin" className="font-semibold text-cobalt">Sign in</Link>
+            Already with us? <Link to="/signin" className="font-semibold text-accent-text underline underline-offset-2">Sign in</Link>
           </p>
         </motion.div>
       )}

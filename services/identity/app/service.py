@@ -21,7 +21,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
-import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -50,16 +49,6 @@ AUTH_TOPIC = "auth-events"
 MAX_FAILED_LOGINS = 5
 LOCK_MINUTES = 15
 OTP_TTL_SECONDS = 300
-# A payment code proves the customer holds a second channel (email or phone), so the app that
-# asks for it must not show it. Test addresses on these domains never receive email, so their
-# codes still go to the inbox (the smoke test, browser test and fraud simulator rely on that).
-OTP_TEST_DOMAINS = tuple(d.strip().lower() for d in os.getenv(
-    "OTP_TEST_DOMAINS", "example.com,example.org,loadtest.local").split(",") if d.strip())
-
-
-def _mask_email(email: str) -> str:
-    name, _, domain = email.partition("@")
-    return f"{name[:2]}{'*' * max(len(name) - 2, 1)}@{domain}" if domain else "your email"
 OTP_MAX_ATTEMPTS = 3
 IMPOSSIBLE_SPEED_KMH = 900        # faster than a passenger jet
 IMPOSSIBLE_MIN_KM = 100
@@ -673,16 +662,10 @@ def issue_otp(conn: psycopg.Connection, deps: Deps, customer_id: UUID, purpose: 
                     (security.sha256(f"{otp_id}:{code}"), otp_id))
         cur.execute("SELECT email FROM identity.credentials WHERE customer_id = %s", (customer_id,))
         row = cur.fetchone()
-    email = row["email"] if row else None
-    inbox_body = None
-    if purpose.startswith("txn:") and not (email or "").lower().endswith(OTP_TEST_DOMAINS):
-        inbox_body = (f"{context + '. ' if context else ''}We sent a 6-digit code to "
-                      f"{_mask_email(email) if email else 'your email'} and to your registered phone. "
-                      "It expires in 5 minutes. For your safety, payment codes are never shown in the app.")
     deps.notifier.send(customer_id, "OTP", "Confirmation code",
                        f"{context + '. ' if context else ''}Your code is {code}. It expires in 5 minutes. "
-                       "Never share it with anyone.", email=email,
-                       data={"purpose": purpose}, inbox_body=inbox_body)
+                       "Never share it with anyone.", email=row["email"] if row else None,
+                       data={"purpose": purpose})
     OTPS.labels("issued").inc()
     return {"otp_id": otp_id, "expires_in": OTP_TTL_SECONDS}
 

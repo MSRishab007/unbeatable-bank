@@ -4,25 +4,26 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap font-semibold transition-[background,color,box-shadow,transform] duration-150 active:scale-[0.98] disabled:opacity-50 disabled:active:scale-100 [&_svg]:size-[1.15em] [&_svg]:shrink-0",
+  "press inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-full font-semibold disabled:opacity-45 [&_svg]:size-[1.15em] [&_svg]:shrink-0",
   {
     variants: {
       variant: {
-        primary: "bg-cobalt text-white hover:bg-cobalt-deep shadow-[0_1px_0_rgba(255,255,255,.25)_inset,0_6px_16px_-6px_rgba(45,42,230,.55)]",
-        go: "bg-go text-white hover:bg-go-deep shadow-[0_6px_16px_-6px_rgba(18,166,99,.6)]",
-        secondary: "bg-surface text-ink border border-line hover:border-ink-2/30 hover:bg-mist",
-        ghost: "text-ink-2 hover:bg-ink/5",
-        danger: "bg-danger text-white hover:brightness-95",
-        "danger-ghost": "text-danger hover:bg-bad-bg",
-        link: "text-cobalt underline-offset-4 hover:underline px-0 h-auto",
-        volt: "bg-volt text-ink hover:brightness-95",
-        light: "bg-white text-cobalt-ink hover:bg-white/90",
+        primary: "bg-accent text-accent-ink hover:bg-accent-hover",
+        pay: "bg-pay text-pay-ink hover:bg-pay-hover",
+        night: "bg-night text-on-night hover:bg-night-2",
+        sun: "bg-sun text-sun-ink hover:brightness-95",
+        surface: "bg-surface text-ink hover:bg-sunken",
+        secondary: "border border-line bg-surface text-ink hover:border-ink/30 hover:bg-bg",
+        ghost: "text-ink-2 hover:bg-ink/6 hover:text-ink",
+        danger: "bg-danger text-danger-ink hover:brightness-95",
+        "danger-ghost": "text-danger hover:bg-danger-soft",
+        link: "h-auto px-0 text-accent-text underline-offset-4 hover:underline",
       },
       size: {
-        sm: "h-9 rounded-full px-3.5 text-sm",
-        md: "h-11 rounded-full px-5 text-[15px]",
-        lg: "h-14 rounded-full px-7 text-base",
-        icon: "size-10 rounded-full",
+        sm: "h-9 px-3.5 text-sm",
+        md: "h-11 px-5 text-[15px]",
+        lg: "h-14 px-7 text-base",
+        icon: "size-10",
       },
     },
     defaultVariants: { variant: "primary", size: "md" },

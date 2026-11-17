@@ -20,6 +20,8 @@ from __future__ import annotations
 import asyncio
 from typing import Callable
 
+from psycopg_pool import ConnectionPool
+
 from fastapi import HTTPException
 from fastapi.concurrency import run_in_threadpool
 
@@ -76,3 +78,20 @@ def readiness(get_pool: Callable):
         return {"status": "ready"}
 
     return readyz
+
+
+def pool_options(**extra) -> dict:
+    """Settings every service's ConnectionPool uses, so a database restart cannot strand it.
+
+    After Cloud SQL restarts (maintenance, or "terminating connection due to administrator
+    command"), connections already in the pool can be half-dead: the socket looks open but
+    no reply ever comes, and a query on it hangs until the caller's deadline. So:
+      check          the pool tests each connection before lending it and replaces a dead one
+      keepalives     TCP keepalives notice a silent peer within about a minute
+      tcp_user_timeout  a write that is not acknowledged in 15 s fails fast
+      max_idle / max_lifetime  connections are recycled regularly anyway
+    """
+    kwargs = {"autocommit": True, "keepalives": 1, "keepalives_idle": 30, "keepalives_interval": 10,
+              "keepalives_count": 3, "tcp_user_timeout": 15000, **extra}
+    return {"kwargs": kwargs, "check": ConnectionPool.check_connection,
+            "max_idle": 300.0, "max_lifetime": 1800.0}

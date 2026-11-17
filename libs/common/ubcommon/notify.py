@@ -9,6 +9,7 @@ function, so only the inbox write happens, in-process.
 
 Inbox documents (collection `notifications`):
     customer_id, type, title, body, data, created_at (epoch seconds), read
+    (body is the message's inbox_body when it has one)
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ def inbox_document(message: dict) -> dict:
         "customer_id": message["customer_id"],
         "type": message.get("type", "INFO"),
         "title": message.get("title", ""),
-        "body": message.get("body", ""),
+        "body": message.get("inbox_body") or message.get("body", ""),
         "data": message.get("data") or {},
         "created_at": message.get("created_at") or time.time(),
         "read": False,
@@ -42,10 +43,12 @@ class Notifier:
 
     def send(self, customer_id, type: str, title: str, body: str, *, email: str | None = None,
              data: dict | None = None, message_id: str | None = None,
-             channels: list[str] | None = None) -> str:
+             channels: list[str] | None = None, inbox_body: str | None = None) -> str:
         """Pass a deterministic message_id when re-sending must not create a duplicate.
 
-        channels: besides the inbox (always), any of "email", "rcs". None = by type."""
+        channels: besides the inbox (always), any of "email", "rcs". None = by type.
+        inbox_body: what the in-app inbox shows instead of `body` (email and RCS still get
+        `body`). Payment codes use it, so the code never appears in the app that asks for it."""
         message_id = message_id or uuid.uuid4().hex
         message = {
             "message_id": message_id, "customer_id": str(customer_id), "type": type, "title": title,
@@ -53,6 +56,8 @@ class Notifier:
         }
         if channels is not None:
             message["channels"] = list(channels)
+        if inbox_body is not None:
+            message["inbox_body"] = inbox_body
         self.publisher.publish(TOPIC, message)
         return message_id
 

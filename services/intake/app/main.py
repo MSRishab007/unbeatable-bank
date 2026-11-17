@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
-from ubcommon.dbpool import connection_dependency, readiness
+from ubcommon.dbpool import connection_dependency, readiness, pool_options
 from ubcommon.auth import parse_actor
 from ubcommon.logging_setup import setup_logging
 from ubcommon.metrics import instrument
@@ -50,7 +50,7 @@ def build_deps() -> service.Deps:
 async def lifespan(_: FastAPI):
     _state["pool"] = ConnectionPool(
         os.environ["DATABASE_URL"], min_size=1, max_size=int(os.getenv("DB_POOL_MAX", "5")),
-        kwargs={"autocommit": True}, open=True,
+        **pool_options(), open=True,
     )
     _state.setdefault("deps", build_deps())
     yield

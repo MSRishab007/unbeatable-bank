@@ -752,7 +752,7 @@ with sync_playwright() as pw:
         n.locator("#identifier").fill(payee["email"])
         n.locator("#password").fill(PASSWORD)
         n.get_by_role("button", name="Sign in", exact=True).click()
-        expect(n.get_by_text("Ravi", exact=True)).to_be_visible()
+        expect(n.get_by_role("heading", name=re.compile(r"\bRavi\b"))).to_be_visible()   # "Good evening, Ravi"
         shot(n, "28-new-home")
         n.goto(BASE + "/#/pay")
         n.locator("#payee").fill(f"asha{RUN}@unbeatable")

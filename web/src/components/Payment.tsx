@@ -125,7 +125,7 @@ export function Checks({ p, animate = true }: { p: Payment; animate?: boolean })
 const HEADLINE: Record<string, (p: Payment) => string> = {
   COMPLETED: (p) => `Sent to ${p.to_display_name || p.payee_ref}.`,
   DECLINED: (p) => p.decline_message || "This payment was declined. No money moved.",
-  CHALLENGE: () => "This looks different from your usual payments, so we sent a code to your inbox and email.",
+  CHALLENGE: () => "This looks different from your usual payments, so we sent a code to your email and phone.",
   HELD: () => "We've paused this payment for a quick review. The money is set aside and hasn't left your account.",
 };
 
@@ -205,7 +205,7 @@ export function Slip({ p: initial, fresh = false, onChange }: { p: Payment; fres
       const r = await api<{ status: number; data: any }>("POST", `/api/payments/${p.txn_id}/confirm`, { otp: value },
         { full: true, accept: [400, 401, 403, 409, 422] });
       if (r.data?.txn_id && r.data.status !== "CHALLENGE") update(r.data);
-      else { setErr(r.data?.message || r.data?.decline_message || "That code isn't right. Check your inbox and try again."); setCode(""); setShake((n) => n + 1); }
+      else { setErr(r.data?.message || r.data?.decline_message || "That code isn't right. Check your email or phone and try again."); setCode(""); setShake((n) => n + 1); }
     } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
   }
 
@@ -231,7 +231,7 @@ export function Slip({ p: initial, fresh = false, onChange }: { p: Payment; fres
           <PinBoxes kind="OTP" name="otp" mask={false} value={code} onChange={setCode} onComplete={(v) => confirm(v)} invalid={!!err && !code} shake={shake} />
           {err && <p role="alert" className="text-center text-sm font-medium text-danger">{err}</p>}
           <Button type="submit" variant="pay" size="lg" className="w-full" disabled={busy || code.length !== 6}>Confirm payment</Button>
-          <p className="text-center text-[13px] text-muted">The code is in your <a href="#/inbox" className="font-semibold text-accent-text underline underline-offset-2">inbox</a> and works for five minutes.</p>
+          <p className="text-center text-[13px] text-muted">The code is in your email and on your phone. It works for five minutes. We never show payment codes in the app.</p>
         </form>
       )}
       {p.status === "HELD" && (

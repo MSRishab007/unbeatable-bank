@@ -327,7 +327,9 @@ def cash_deposit(deps: Deps, *, account_number: str, amount: int, idempotency_ke
     except LedgerRejected as r:
         raise InvalidRequest(r.message, code=r.code) from r
     except DependencyUnavailable as e:
-        raise Pending("a downstream service is unavailable; retry with the same Idempotency-Key") from e
+        log.warning("cash deposit to %s pending: %s", account_number, e)
+        raise Pending("a downstream service is unavailable; retry with the same Idempotency-Key",
+                      reason=str(e)) from e
     return {"journal_id": journal_id, "account_id": account["account_id"], "amount": amount}
 
 
@@ -378,6 +380,7 @@ def _advance(conn: psycopg.Connection, deps: Deps, txn: dict) -> dict:
                 log.warning("could not release hold %s for declined txn %s", txn["hold_id"], txn_id)
         return _set_status(conn, txn_id, "DECLINED", ("PROCESSING",), decline_code=r.code)
     except DependencyUnavailable as e:
+        log.warning("payment %s pending: %s", txn_id, e)
         raise Pending("a downstream service is unavailable; retry with the same Idempotency-Key",
                       txn_id=str(txn_id), reason=str(e)) from e
     return _set_status(conn, txn_id, "COMPLETED", ("PROCESSING",), journal_id=journal_id)

@@ -336,7 +336,7 @@ def handle(message: dict, store, mailer=None, rcs=None, now: float | None = None
         "customer_id": customer,
         "type": message.get("type", "INFO"),
         "title": title,
-        "body": body,
+        "body": message.get("inbox_body") or body,   # payment codes never reach the app
         "data": message.get("data") or {},
         "created_at": created,
         "read": False,

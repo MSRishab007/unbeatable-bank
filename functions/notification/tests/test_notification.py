@@ -288,3 +288,13 @@ def test_a_wrapped_quota_error_is_still_recognised():
         raise main.StageError("sending: 550") from smtplib.SMTPDataError(550, b"5.4.5 Daily user sending limit exceeded.")
     except main.StageError as e:
         assert main.is_quota_error(e)
+
+
+def test_a_payment_code_goes_by_email_and_rcs_but_not_to_the_inbox():
+    store, sent, texts = Store(), [], []
+    m = message(type="OTP", title="Confirmation code", phone="+919876543210",
+                body="Your code is 482913. It expires in 5 minutes.",
+                inbox_body="We sent a 6-digit code to ri**@gmail.com and to your registered phone.")
+    main.handle(m, store, lambda to, subject, body: sent.append(body), lambda phone, text, mid: texts.append(text))
+    assert "482913" in sent[0] and "482913" in texts[0]
+    assert "482913" not in store.docs[("notifications", "m1")]["body"]

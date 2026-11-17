@@ -40,9 +40,12 @@ check-project:
 	@test -n "$(PROJECT)" || { echo "Set project_id in infra/main/terraform.tfvars first (see docs/DEPLOY.md)"; exit 1; }
 
 ipv4: # Cloud Shell sometimes resolves Google APIs to IPv6, which it can't route ("cannot assign requested address")
-	@if [ "$$CLOUD_SHELL" = "true" ] && [ "$$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null)" != "1" ]; then \
-		sudo -n sysctl -q -w net.ipv6.conf.all.disable_ipv6=1 net.ipv6.conf.default.disable_ipv6=1 \
-		&& echo "IPv6 turned off in this Cloud Shell (it can't reach Google APIs over IPv6)" || true; fi
+	@if { [ "$$CLOUD_SHELL" = "true" ] || [ -n "$$DEVSHELL_PROJECT_ID" ]; } && [ -e /proc/sys/net/ipv6/conf/all/disable_ipv6 ]; then \
+		for f in /proc/sys/net/ipv6/conf/*/disable_ipv6; do \
+			[ "$$(cat $$f)" = "1" ] || echo 1 | sudo -n tee $$f >/dev/null 2>&1 || true; done; \
+		if grep -q 0 /proc/sys/net/ipv6/conf/*/disable_ipv6 2>/dev/null; then \
+			echo "WARNING: could not turn off IPv6; Terraform may fail with 'cannot assign requested address'. Run: sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1"; \
+		else echo "IPv6 is off in this Cloud Shell (it can't reach Google APIs over IPv6)"; fi; fi
 
 init: check-project ipv4 ## initialise Terraform (once per machine)
 	$(TF_MAIN) init -input=false -backend-config="bucket=$(STATE_BUCKET)"

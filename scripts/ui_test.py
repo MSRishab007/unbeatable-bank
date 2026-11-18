@@ -756,23 +756,27 @@ with sync_playwright() as pw:
             ctx.close()
 
     def new_app_steps(n):
+        # The slowest step: sign-in, a payee lookup, all six checks and the ~4 s payment
+        # moment. A 2-CPU CI runner also hosts every service, so give each wait more room.
+        n.set_default_timeout(30_000)
+        slow = 25_000
         n.goto(BASE + "/")
-        expect(n.get_by_role("heading", name=re.compile("We are"))).to_be_visible()
+        expect(n.get_by_role("heading", name=re.compile("We are"))).to_be_visible(timeout=slow)
         shot(n, "27-new-landing")
         n.goto(BASE + "/#/signin")
         n.locator("#identifier").fill(payee["email"])
         n.locator("#password").fill(PASSWORD)
         n.get_by_role("button", name="Sign in", exact=True).click()
-        expect(n.get_by_role("heading", name=re.compile(r"\bRavi\b"))).to_be_visible()   # "Good evening, Ravi"
+        expect(n.get_by_role("heading", name=re.compile(r"\bRavi\b"))).to_be_visible(timeout=slow)   # "Good evening, Ravi"
         shot(n, "28-new-home")
         n.goto(BASE + "/#/pay")
         n.locator("#payee").fill(f"asha{RUN}@unbeatable")
-        expect(n.get_by_role("button", name="Change who you're paying")).to_be_visible()
+        expect(n.get_by_role("button", name="Change who you're paying")).to_be_visible(timeout=slow)
         n.locator("#amount").fill("10")
         n.get_by_role("button", name=re.compile("Swipe to pay")).press("Enter")      # the slider's keyboard path
         n.get_by_role("dialog").locator("input").fill(PAY_PIN)
-        expect(n.locator("#payment-result")).to_be_visible(timeout=12_000)   # after the full-screen moment
-        expect(n.locator("#payment-result .stamp")).to_have_text(re.compile("Paid|Confirm it's you|Under review"))
+        expect(n.locator("#payment-result")).to_be_visible(timeout=slow)   # after the full-screen moment
+        expect(n.locator("#payment-result .stamp")).to_have_text(re.compile("Paid|Confirm it's you|Under review"), timeout=slow)
         shot(n, "29-new-paid")
     step("the new app: landing, sign-in, and a payment with the slider and PIN", new_app)
 

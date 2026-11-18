@@ -25,31 +25,31 @@ configMapGenerator:
 images:
 - name: unbeatable/dynastore
   newName: us-central1-docker.pkg.dev/unbeatable-bank-17/unbeatable/dynastore
-  newTag: 775601312e78ce5011319e52b6363ce3880567c1
+  newTag: 96d14583b69a7b1e0b3dc5fb8d484d981f4360d6
 - name: unbeatable/gateway
   newName: us-central1-docker.pkg.dev/unbeatable-bank-17/unbeatable/gateway
-  newTag: 775601312e78ce5011319e52b6363ce3880567c1
+  newTag: 96d14583b69a7b1e0b3dc5fb8d484d981f4360d6
 - name: unbeatable/identity
   newName: us-central1-docker.pkg.dev/unbeatable-bank-17/unbeatable/identity
-  newTag: 775601312e78ce5011319e52b6363ce3880567c1
+  newTag: 96d14583b69a7b1e0b3dc5fb8d484d981f4360d6
 - name: unbeatable/account
   newName: us-central1-docker.pkg.dev/unbeatable-bank-17/unbeatable/account
-  newTag: 775601312e78ce5011319e52b6363ce3880567c1
+  newTag: 96d14583b69a7b1e0b3dc5fb8d484d981f4360d6
 - name: unbeatable/ledger
   newName: us-central1-docker.pkg.dev/unbeatable-bank-17/unbeatable/ledger
-  newTag: 775601312e78ce5011319e52b6363ce3880567c1
+  newTag: 96d14583b69a7b1e0b3dc5fb8d484d981f4360d6
 - name: unbeatable/intake
   newName: us-central1-docker.pkg.dev/unbeatable-bank-17/unbeatable/intake
-  newTag: 775601312e78ce5011319e52b6363ce3880567c1
+  newTag: 96d14583b69a7b1e0b3dc5fb8d484d981f4360d6
 - name: unbeatable/ratelimit
   newName: us-central1-docker.pkg.dev/unbeatable-bank-17/unbeatable/ratelimit
-  newTag: 775601312e78ce5011319e52b6363ce3880567c1
+  newTag: 96d14583b69a7b1e0b3dc5fb8d484d981f4360d6
 - name: unbeatable/risk
   newName: us-central1-docker.pkg.dev/unbeatable-bank-17/unbeatable/risk
-  newTag: 775601312e78ce5011319e52b6363ce3880567c1
+  newTag: 96d14583b69a7b1e0b3dc5fb8d484d981f4360d6
 - name: unbeatable/fraud
   newName: us-central1-docker.pkg.dev/unbeatable-bank-17/unbeatable/fraud
-  newTag: 775601312e78ce5011319e52b6363ce3880567c1
+  newTag: 96d14583b69a7b1e0b3dc5fb8d484d981f4360d6
 - name: unbeatable/deposits
   newName: us-central1-docker.pkg.dev/unbeatable-bank-17/unbeatable/deposits
-  newTag: 775601312e78ce5011319e52b6363ce3880567c1
+  newTag: 96d14583b69a7b1e0b3dc5fb8d484d981f4360d6

@@ -359,14 +359,13 @@ def list_customer_accounts(conn: psycopg.Connection, customer_id: UUID) -> list[
         return cur.fetchall()
 
 
-# A freeze for fraud also stops money coming in: a victim must not be able to keep paying a mule.
-FRAUD_FREEZE_PREFIXES = ("automatic:", "fraud confirmed")
-
-
 def _receivable(status: str, freeze_reason: str | None) -> bool:
+    """A frozen account can still receive money (its owner may be a fraud victim, or have
+    blocked everything themselves), except a mule: an account the stream job caught
+    collecting money from many senders. Paying it more would only feed the scam."""
     if status in ("ACTIVE", "DORMANT"):
         return True
-    return status == "FROZEN" and not (freeze_reason or "").lower().startswith(FRAUD_FREEZE_PREFIXES)
+    return status == "FROZEN" and "MULE_FAN_IN" not in (freeze_reason or "")
 
 
 def lookup_by_number(conn: psycopg.Connection, account_number: str) -> dict:

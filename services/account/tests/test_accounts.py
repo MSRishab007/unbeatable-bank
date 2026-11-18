@@ -398,9 +398,12 @@ def test_pay_by_mobile_is_opt_in_and_uses_the_chosen_account(conn, ledger, make_
     assert service.lookup_payee(conn, first["account_number"])["kind"] == "ACCOUNT_NUMBER"
 
 
-def test_an_account_frozen_for_fraud_cannot_receive(conn, ledger, make_customer):
+def test_a_mule_account_cannot_receive_but_a_victims_frozen_account_can(conn, ledger, make_customer):
     mule = service.open_account(conn, ledger, product_type="SAVINGS", holder_ids=[make_customer()], actor=ACTOR)
+    victim = service.open_account(conn, ledger, product_type="SAVINGS", holder_ids=[make_customer()], actor=ACTOR)
     other = service.open_account(conn, ledger, product_type="SAVINGS", holder_ids=[make_customer()], actor=ACTOR)
+    service.freeze_account(conn, ledger, victim["account_id"], reason="fraud confirmed in CASE-1001", actor=ACTOR)
+    assert service.lookup_by_number(conn, victim["account_number"])["can_receive"]
     service.freeze_account(conn, ledger, mule["account_id"], reason="automatic: MULE_FAN_IN", actor=ACTOR)
     service.freeze_account(conn, ledger, other["account_id"], reason="customer blocked everything", actor=ACTOR)
     assert not service.lookup_by_number(conn, mule["account_number"])["can_receive"]

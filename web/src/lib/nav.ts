@@ -24,5 +24,14 @@ export const appUrl = (path: string): string => `${location.origin}${HASH_ROUTES
  * path into the real path before the router starts.
  */
 export function upgradeHashLink() {
-  if (!HASH_ROUTES && location.hash.startsWith("#/")) history.replaceState(null, "", location.hash.slice(1));
+  if (HASH_ROUTES) return;
+  const upgrade = () => {
+    if (!location.hash.startsWith("#/")) return false;
+    history.replaceState(null, "", location.hash.slice(1));
+    return true;
+  };
+  upgrade();
+  // An old link followed while the app is open changes only the hash, so the page doesn't
+  // reload: move it into the path and tell the router.
+  addEventListener("hashchange", () => { if (upgrade()) dispatchEvent(new PopStateEvent("popstate")); });
 }

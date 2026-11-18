@@ -7,7 +7,7 @@ import { Empty, PageHead, Section, sectionLink } from "@/components/AppShell";
 import { Avatar, PaymentRow, PaymentSheet, Slip } from "@/components/Payment";
 import { Scanner } from "@/components/Scanner";
 import { AmountEntry } from "@/components/AmountEntry";
-import { Journey } from "@/components/Journey";
+import { PaymentMoment } from "@/components/PaymentMoment";
 import { SwipeButton } from "@/components/SwipeButton";
 import { Badge, Card, Skeleton } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -84,6 +84,7 @@ export default function Pay() {
   const [channel, setChannel] = useState(params.get("to") ? "QR_PAYMENT" : "TRANSFER");
   const [result, setResult] = useState<Payment | null>(null);
   const [journey, setJourney] = useState<Payment | null>(null);
+  const [tookMs, setTookMs] = useState(0);
   const [picked, setPicked] = useState("");    // the person tapped in "recent": their avatar flies into place
   const [error, setError] = useState("");
   const [addPayee, setAddPayee] = useState(false);
@@ -130,10 +131,14 @@ export default function Pay() {
     try {
       const body: Record<string, unknown> = { from_account_id: from, payee: payee!.value, amount: paise, channel };
       if (note.trim()) body.note = note.trim();
-      const r = await withPinContext(`Pay ${inr(paise)} to ${payee!.name}`, () =>
-        api<{ status: number; data: any }>("POST", "/api/payments", body, { headers: { "Idempotency-Key": key.current }, full: true, accept: [422] }));
+      let sent = 0;
+      const r = await withPinContext(`Pay ${inr(paise)} to ${payee!.name}`, () => {
+        sent = performance.now();            // after the PIN: the time the bank itself takes
+        return api<{ status: number; data: any }>("POST", "/api/payments", body, { headers: { "Idempotency-Key": key.current }, full: true, accept: [422] });
+      });
+      setTookMs(Math.round(performance.now() - sent));
       if (!r.data?.txn_id) throw new ApiError(r.status, messageOf(r.data, r.status));
-      setJourney(r.data);          // the payment's trip through the six checks, then the slip
+      setJourney(r.data);          // the full-screen moment, then the receipt
       key.current = uuid();
       refreshMoney();
     } catch (ex) {
@@ -193,9 +198,8 @@ export default function Pay() {
 
       <div className="grid grid-cols-[minmax(0,1fr)] items-start gap-8 lg:grid-cols-[minmax(0,460px)_minmax(0,1fr)]">
         <Card className="relative overflow-hidden rounded-panel p-4 sm:p-6" id="pay-card">
-          {journey && !result ? (
-            <Journey p={journey} onDone={() => { setResult(journey); setJourney(null); }} />
-          ) : result ? (
+          {journey && !result && <PaymentMoment p={journey} clientMs={tookMs} onDone={() => { setResult(journey); setJourney(null); }} />}
+          {result ? (
             <motion.div key="result" id="payment-result" aria-live="polite" className="print-in">
               <Slip p={result} fresh onChange={setResult} />
               <div className="mt-6 grid grid-cols-2 gap-3">

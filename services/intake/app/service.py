@@ -156,6 +156,11 @@ def present(row: dict) -> dict:
     out = {k: v for k, v in row.items() if k not in ("request_hash", "reserved", "limits", "ip")}
     out["decline_message"] = DECLINE_MESSAGES.get(row["decline_code"]) if row["decline_code"] else None
     out["next_action"], out["message"] = WAITING_MESSAGES.get(row["status"], (None, out["decline_message"]))
+    # How long the bank took, from receiving the payment to its outcome (all six checks and
+    # the ledger posting). The app shows it on the receipt: "Completed in 0.42 s".
+    created, updated = row.get("created_at"), row.get("updated_at")
+    out["processing_ms"] = (round((updated - created).total_seconds() * 1000)
+                            if created and updated and row["status"] != "PROCESSING" else None)
     return out
 
 

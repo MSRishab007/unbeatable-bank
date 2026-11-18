@@ -122,7 +122,7 @@ async function handle(req: Request, url: URL): Promise<Response> {
     const kind = to.includes("@") ? "PAY_ID" : /^\d{12}$/.test(to) ? "ACCOUNT_NUMBER" : "MOBILE";
     const name = kind === "ACCOUNT_NUMBER" ? nameOf(to) || to : "Ravi Kumar";
     const pay: Payment = { txn_id: crypto.randomUUID(), status: "COMPLETED", amount: body.amount, to_display_name: name, payee_ref: to,
-      to_account_number: kind === "ACCOUNT_NUMBER" ? to : "500100020001", payee_kind: kind, from_account_id: body.from_account_id, note: body.note, created_at: new Date().toISOString(),
+      to_account_number: kind === "ACCOUNT_NUMBER" ? to : "500100020001", payee_kind: kind, processing_ms: 240 + Math.round(Math.random() * 260), from_account_id: body.from_account_id, note: body.note, created_at: new Date().toISOString(),
       risk_score: 4, risk_decision: "ALLOW", risk_reasons: [], channel: body.channel };
     if (body.amount > 5_000_000) Object.assign(pay, { status: "DECLINED", decline_code: "PER_TXN_LIMIT", risk_score: null,
       decline_message: "That's over your ₹50,000 limit for one payment. Raise the limit on the account page, or send less." });

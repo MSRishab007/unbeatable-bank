@@ -412,3 +412,8 @@ def test_history_is_per_customer(conn, deps, riya):
     assert txn["txn_id"] in {t["txn_id"] for t in service.list_transactions(conn, riya["cid"])}
     with pytest.raises(service.NotFound):
         service.get_transaction(conn, txn["txn_id"], uuid.uuid4())
+
+
+def test_a_payment_reports_how_long_the_bank_took(conn, deps, riya):
+    txn = pay(conn, deps, riya["cid"], riya["acct"], riya["payee_no"], 100 * RS)[0]
+    assert txn["status"] == "COMPLETED" and isinstance(txn["processing_ms"], int) and 0 <= txn["processing_ms"] < 10_000

@@ -44,6 +44,7 @@ export type Payment = {
   risk_score?: number | null;
   payee_kind?: "ACCOUNT_NUMBER" | "PAY_ID" | "MOBILE" | null;
   own_transfer?: boolean;
+  processing_ms?: number | null;
   risk_decision?: string | null;
   risk_reasons?: string[];
   replayed?: boolean;

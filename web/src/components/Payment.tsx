@@ -222,6 +222,11 @@ export function Slip({ p: initial, fresh = false, onChange }: { p: Payment; fres
           {p.to_account_number ? <span className="num">, {groupDigits(p.to_account_number)}</span> : ""}
         </p>
         <span className="stamp mt-4 rounded-full bg-surface px-3 py-1 text-xs font-bold text-ink">{s.label}</span>
+        {p.processing_ms != null && p.status !== "PROCESSING" && (
+          <span className="mt-2 text-[12px] font-medium opacity-80 num">
+            {p.status === "COMPLETED" ? "Completed" : "Checked"} in {p.processing_ms < 1000 ? (p.processing_ms / 1000).toFixed(2) : (p.processing_ms / 1000).toFixed(1)} s
+          </span>
+        )}
       </motion.div>
       <p className="message mx-auto mt-4 max-w-sm text-center text-[15px] leading-relaxed text-ink-2">{HEADLINE[p.status]?.(p) || p.message || ""}</p>
 

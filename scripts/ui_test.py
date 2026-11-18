@@ -760,7 +760,7 @@ with sync_playwright() as pw:
         n.locator("#amount").fill("10")
         n.get_by_role("button", name=re.compile("Swipe to pay")).press("Enter")      # the slider's keyboard path
         n.get_by_role("dialog").locator("input").fill(PAY_PIN)
-        expect(n.locator("#payment-result")).to_be_visible()
+        expect(n.locator("#payment-result")).to_be_visible(timeout=12_000)   # after the full-screen moment
         expect(n.locator("#payment-result .stamp")).to_have_text(re.compile("Paid|Confirm it's you|Under review"))
         shot(n, "29-new-paid")
         ctx.close()

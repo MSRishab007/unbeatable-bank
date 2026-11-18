@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -37,6 +38,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ubcommon.auth import AuthError, verify_token
 from ubcommon.logging_setup import setup_logging
@@ -471,6 +473,25 @@ async def proxy(request: Request, rest: str):
     return error(404, "NOT_FOUND", "no such API endpoint")
 
 
+# The customer app's own pages (/home, /pay, /accounts/<id>...). The browser asks the server
+# for them when someone opens a link or reloads; the answer is the app itself, which then
+# shows the right page. Anything else that isn't a file is still a 404.
+APP_PAGES = re.compile(r"(home|pay|receive|activity|inbox|deposits|profile|security|signin|register"
+                       r"|accounts(/[\w-]+)?|staff(/.*)?)/?")
+
+
+class WebApp(StaticFiles):
+    async def get_response(self, path: str, scope):
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as e:
+            if e.status_code == 404 and APP_PAGES.fullmatch(path):
+                response = await super().get_response("index.html", scope)
+                response.headers["Cache-Control"] = "no-cache"
+                return response
+            raise
+
+
 _static = Path(os.getenv("STATIC_DIR", Path(__file__).resolve().parents[1] / "static"))
 if _static.is_dir():
-    app.mount("/", StaticFiles(directory=_static, html=True), name="web")
+    app.mount("/", WebApp(directory=_static, html=True), name="web")

@@ -1,3 +1,4 @@
+import { appUrl } from "@/lib/nav";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import QRCode from "qrcode";
@@ -32,7 +33,7 @@ export default function Receive() {
     const q = new URLSearchParams({ to: a.account_number });
     if (paise) q.set("amount", (paise / 100).toFixed(2));
     if (note.trim()) q.set("note", note.trim());
-    return `${location.origin}/#/pay?${q}`;
+    return appUrl(`/pay?${q}`);
   }, [a, paise, note]);
   useEffect(() => {
     if (!link || !canvas.current) return;

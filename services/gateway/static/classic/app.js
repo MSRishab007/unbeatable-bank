@@ -1151,7 +1151,7 @@
   // "#/pay?to=...&amount=..." links are what our QR codes contain. Also accepts a bare account number or pay ID.
   function parsePayCode(text) {
     const t = String(text || "").trim();
-    const m = t.match(/#\/pay\?(.*)$/);
+    const m = t.match(/\/pay\?(.*)$/);
     if (m) {
       const q = new URLSearchParams(m[1]);
       if (q.get("to")) return { to: q.get("to"), amount: q.get("amount") || "", note: q.get("note") || "" };

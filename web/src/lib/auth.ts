@@ -1,3 +1,4 @@
+import { go, here } from "./nav";
 import { api, setOnSignedOut } from "./api";
 import { deviceFingerprint, deviceLabel, isLocked, showLockScreen, useSession } from "./session";
 import { queryClient } from "./query";
@@ -47,7 +48,7 @@ export function signOut(expired = false) {
   useSession.getState().set(null);
   queryClient.clear();
   if (expired) toast.error("Your session ended. Sign in again.");
-  if (!/^#\/(signin|register)?$/.test(location.hash)) location.hash = expired ? "/signin" : "/";
+  if (!/^\/(signin|register)?$/.test(here())) go(expired ? "/signin" : "/");
 }
 setOnSignedOut((expired) => signOut(expired));
 

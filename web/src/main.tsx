@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { HashRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { BrowserRouter, HashRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { HASH_ROUTES, upgradeHashLink } from "./lib/nav";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { MotionConfig } from "motion/react";
 import { Toaster } from "sonner";
@@ -45,7 +46,10 @@ function ToClassic() {
   return null;
 }
 
+const Router = HASH_ROUTES ? HashRouter : BrowserRouter;
+
 async function boot() {
+  upgradeHashLink();
   // Demo mode (`npm run demo`, or VITE_MOCK=1) answers /api from src/mocks instead of a real
   // backend. The flag is a constant at build time and is never set for `npm run build`, so the
   // bundle the gateway serves does not contain the mocks.
@@ -54,7 +58,7 @@ async function boot() {
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
       <MotionConfig reducedMotion="user">
-        <HashRouter>
+        <Router>
           <Routes>
             <Route path="/" element={<Public><Landing /></Public>} />
             <Route path="/signin" element={<Public><SignIn /></Public>} />
@@ -75,7 +79,7 @@ async function boot() {
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
           <Prompts />
-        </HashRouter>
+        </Router>
         <Toaster position="top-center" richColors closeButton toastOptions={{ style: { fontFamily: "var(--font-sans)", borderRadius: "var(--radius-card)" } }} />
       </MotionConfig>
     </QueryClientProvider>

@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { Logo } from "./Logo";
 import { useInbox } from "@/lib/query";
 import { lockNow, signOut, startIdleWatch } from "@/lib/auth";
+import { go } from "@/lib/nav";
 import { useSession } from "@/lib/session";
 import { spring } from "@/lib/motion";
 import { cn, initials } from "@/lib/utils";
@@ -30,7 +31,7 @@ function useInboxToasts() {
     const fresh = seen.current ? data.filter((n) => !seen.current!.has(n.id)) : [];
     seen.current = new Set(data.map((n) => n.id));
     if (fresh.length && pathname !== "/inbox") {
-      toast(fresh[0]!.title, { description: fresh[0]!.body.slice(0, 120), action: { label: "Open", onClick: () => (location.hash = "/inbox") } });
+      toast(fresh[0]!.title, { description: fresh[0]!.body.slice(0, 120), action: { label: "Open", onClick: () => go("/inbox") } });
     }
   }, [data, pathname]);
   return data?.filter((n) => !n.read).length ?? 0;

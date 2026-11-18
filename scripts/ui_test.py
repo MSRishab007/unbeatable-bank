@@ -52,7 +52,9 @@ def step(name: str, fn) -> None:
         print(f"  ok    {name}")
     except Exception as e:  # noqa: BLE001 - report and carry on
         failed += 1
-        print(f"  FAIL  {name}\n        {str(e).splitlines()[0][:300]}")
+        lines = str(e).splitlines()
+        waiting = next((ln.strip() for ln in lines if "waiting for" in ln), "")
+        print(f"  FAIL  {name}\n        {lines[0][:300] if lines else e!r}" + (f"\n        ({waiting[:200]})" if waiting else ""))
         if SHOTS and "page" in globals():                 # what the customer's screen showed
             try:
                 globals()["page"].screenshot(path=str(SHOTS / f"FAILED-{failed:02d}.png"))
@@ -745,6 +747,15 @@ with sync_playwright() as pw:
         ctx = payee_browser(viewport={"width": 390, "height": 844})
         n = ctx.new_page()
         watch(n, "new-app")
+        try:
+            new_app_steps(n)
+        except Exception:
+            shot(n, "FAILED-new-app")
+            raise
+        finally:
+            ctx.close()
+
+    def new_app_steps(n):
         n.goto(BASE + "/")
         expect(n.get_by_role("heading", name=re.compile("We are"))).to_be_visible()
         shot(n, "27-new-landing")
@@ -763,7 +774,6 @@ with sync_playwright() as pw:
         expect(n.locator("#payment-result")).to_be_visible(timeout=12_000)   # after the full-screen moment
         expect(n.locator("#payment-result .stamp")).to_have_text(re.compile("Paid|Confirm it's you|Under review"))
         shot(n, "29-new-paid")
-        ctx.close()
     step("the new app: landing, sign-in, and a payment with the slider and PIN", new_app)
 
     print("\n9. Block everything")

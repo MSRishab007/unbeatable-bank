@@ -160,20 +160,9 @@ names follow it within about 2 minutes.
 To check a deployment from your laptop: `make smoke` (API), `make ui-test` (web app
 in a browser) and `make simulate` (fraud personas).
 
-## Not yet verified on GCP
+## Verified on GCP
 
-The application code is tested locally end to end. The Terraform validates and
-the manifests pass schema checks, but none of it had been applied to a real
-project when this was written. Expect to fix small things on the first
-`make up`; the most likely places are the Dataproc submit script
-(`services/audit-analytics/submit.sh`), chart versions in `deploy/argocd/apps`
-and IAM roles for the Cloud Function build.
-
-Also not yet proven when this was written:
-
-- The CI jobs `compose-e2e` and `adapters` had not run on GitHub's runners. The
-  Firestore and Pub/Sub contract tests in `libs/common/tests` need Google's emulators,
-  which only CI starts; the Cloud Storage, Postgres and in-memory backends were run
-  on a development machine.
-- The KYC bucket's `soft_delete_policy` and the per-service Google service accounts
-  validate, but have not been applied.
+Every step above has been run on the cloud project: the three Terraform layers, the
+ArgoCD rollout, the load test with autoscaling, the Flink job on Dataproc, the fraud
+simulator and the browser test. The design document (`docs/report/main.pdf`, Sections 7
+and 8) reports the results.

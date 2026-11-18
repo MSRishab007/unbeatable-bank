@@ -1,34 +1,34 @@
-# Figures for the design document
+# Figures of the design document
 
-Mermaid sources go here as `<name>.mmd`; export each to PDF with
-`mmdc -c mermaid.json -i <name>.mmd -o <name>.pdf -f -b white`. The hash ring is drawn in TikZ in
-`dynastore-ring.tex`, which main.tex includes directly (or paste the source into mermaid.live and export).
-Screenshots go here as `<name>.png`. In `main.tex`, replace the matching
-`\mermaidplaceholder{<name>}...` or `\screenshotplaceholder{<name>}...` with
-`\begin{figure}[H]\centering\includegraphics[width=\linewidth]{figures/<name>}\caption{...}\label{fig:<name>}\end{figure}`.
+The design document (`../main.tex`) includes every file here.
 
-## Mermaid diagrams (10)
+## Diagrams
 
-| # | File | Section | What it shows | Status |
-|---|------|---------|---------------|--------|
-| 1 | deployment.pdf | 3.1 Architecture Overview | Users and k6 to the Google load balancer, Traefik and the gateway in GKE; bank namespace (services, DynaStore), Kafka, ArgoCD, monitoring; Cloud SQL, Firestore, Cloud Storage, Pub/Sub, Cloud Function, Dataproc, Secret Manager, Artifact Registry, Cloud Logging; all in one VPC | done |
-| 2 | terraform-layers.pdf | 3.5 Infrastructure as Code | Three layers (bootstrap, main, platform), the resources each creates, and the dependencies between them | done |
-| 3 | gitops.pdf | 3.6 Continuous Delivery and GitOps | Commit to main, CI, image build to Artifact Registry, deploy pull request, merge, ArgoCD pre-sync migrations, rolling update | done |
-| 4 | services.pdf | 4.1 Service Decomposition | The twelve services and their calls (REST from the gateway, gRPC from Intake, DynaStore users, Kafka to Flink and Fraud Alert, Pub/Sub to the function) | done |
-| 5 | payment-sequence.pdf | 4.3 Lifecycle of a Payment | Sequence: client, gateway, Identity (session and PIN), Intake, Rate Limit, Account, Risk, Ledger, outbox to Kafka, Fraud Alert consumes the event and publishes the receipt to Pub/Sub, Notification function; the four risk outcomes | done |
-| 6 | communication.pdf (merged into services.pdf, which styles each edge by mechanism) | 5.1 Interconnection Overview | Same services, edges styled by mechanism | merged |
-| 7 | outbox.pdf | 5.5 Transactional Outbox | Business row and outbox row in one transaction, relay sidecar to Kafka, idempotent consumers | done |
-| 8 | fraud-layers.pdf | 6.2 Defence in Depth | Payment through the five layers; risk score bands (allow < 30, OTP 30-59, hold 60-94, block >= 95); feedback from Flink and Fraud Alert into DynaStore | done |
-| 9 | dynastore-ring.tex (TikZ) | 7.2 DynaStore | Hash ring with virtual nodes for three nodes, one key and its preference list | done |
-| 10 | flink-pipeline.pdf | 7.3 Stream Processing | txn-events into the Flink job on Dataproc, windows, analytics-results and risk-signals, Fraud Alert, checkpoints in Cloud Storage | done |
+| File | Section | Shows |
+|---|---|---|
+| `deployment.pdf` | 3.1 | Cloud deployment architecture |
+| `terraform-layers.pdf` | 3.5 | The three Terraform layers and their dependencies |
+| `gitops.pdf` | 3.6 | Delivery pipeline from commit to rollout |
+| `services.pdf` | 4.1 | The twelve services and how each pair communicates |
+| `payment-sequence.pdf` | 4.3 | Sequence of one payment through the services |
+| `outbox.pdf` | 5.5 | Transactional outbox and idempotent consumers |
+| `fraud-layers.pdf` | 6.2 | The five layers of defence |
+| `dynastore-ring.tex` | 7.2 | DynaStore consistent hashing ring (TikZ) |
+| `flink-pipeline.pdf` | 7.3 | Stream processing pipeline on Dataproc |
 
-## Screenshots (5, plus 1 optional)
+Each `.pdf` diagram is built from the `.mmd` Mermaid source next to it:
 
-| # | File | Section | What it shows | Status |
-|---|------|---------|---------------|--------|
-| 1 | app-overview.png | 2.1 Functional Scope | Phone screens: Home, Pay with the swipe control, the payment result with its six checks | in place |
-| 2 | dynastore-ui.png | 7.2 DynaStore | The DynaStore status page: ring ownership, keys, hints waiting | in place |
-| 3 | flink-results.png | 7.3 Stream Processing | analytics-results and risk-signals output, Stream analytics table, fraud cases | in place |
-| 4 | grafana-loadtest.png | 8.1 Scalability | Grafana during load-test run 3: requests by service, errors, latency, HPA replicas | in place |
-| 5 | cloud-logging.png | 8.3 Observability | Logs Explorer across the bank namespace | in place |
-| 6 | simulator.png (optional) | 6.8 Evaluation with a Fraud Simulator | Fraud simulator summary, 8 of 8 OK, next to Table (simulator outcomes) | have (13 Nov) |
+```bash
+mmdc -c mermaid.json -i <name>.mmd -o <name>.pdf -f -b white
+```
+
+## Screenshots
+
+| File | Section | Shows |
+|---|---|---|
+| `app-overview.png` | 2.1 | Customer home page and staff fraud desk |
+| `dynastore-ui.png` | 7.2 | DynaStore status page during the load test |
+| `flink-results.png` | 7.3 | Per-minute statistics and the cases opened by fraud signals |
+| `grafana-loadtest.png` | 8.1 | Grafana during the final load test |
+| `cloud-logging.png` | 8.3 | Service logs in Cloud Logging |
+| `bits-logo.png` | Cover | Institute logo |

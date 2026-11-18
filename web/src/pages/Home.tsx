@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { motion } from "motion/react";
+import { motion, useMotionValue, useSpring, useTransform } from "motion/react";
 import { BadgeAlert, Eye, EyeOff, PiggyBank, Plus, QrCode, ScanLine, Users } from "lucide-react";
 import { toast } from "sonner";
 import { Mark } from "@/components/Logo";
@@ -16,7 +16,7 @@ import { api } from "@/lib/api";
 import { spring } from "@/lib/motion";
 import { queryClient, useAccounts, useMe, usePayments } from "@/lib/query";
 import { payable, PRODUCT, type Account, type Me, type Payment } from "@/lib/types";
-import { cn, groupDigits } from "@/lib/utils";
+import { cn, groupDigits, reducedMotion } from "@/lib/utils";
 
 const hour = new Date().getHours();
 const GREETING = hour < 5 ? "Up late" : hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
@@ -73,11 +73,35 @@ export function OpenAccount({ open, onOpenChange }: { open: boolean; onOpenChang
 }
 
 /** One account. Tapping it grows the card into the account page (same layoutId there). */
+/**
+ * A card you can almost pick up: it tilts toward the pointer (or finger), and a soft light
+ * slides across it as it turns, like a real card under a lamp. Still under reduced motion.
+ */
+function useTilt() {
+  const px = useMotionValue(0.5), py = useMotionValue(0.5);
+  const sx = useSpring(px, { stiffness: 220, damping: 20 }), sy = useSpring(py, { stiffness: 220, damping: 20 });
+  const rotateY = useTransform(sx, [0, 1], [-11, 11]);
+  const rotateX = useTransform(sy, [0, 1], [9, -9]);
+  const light = useTransform([sx, sy], ([x, y]) =>
+    `radial-gradient(260px circle at ${(x as number) * 100}% ${(y as number) * 100}%, rgb(255 255 255 / 0.22), transparent 60%)`);
+  const still = reducedMotion();
+  const move = (e: React.PointerEvent<HTMLElement>) => {
+    if (still) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    px.set((e.clientX - r.left) / r.width); py.set((e.clientY - r.top) / r.height);
+  };
+  const leave = () => { px.set(0.5); py.set(0.5); };
+  return { style: still ? {} : { rotateX, rotateY, transformPerspective: 900 }, light: still ? undefined : light, move, leave };
+}
+
 function AccountCard({ a, hidden }: { a: Account; hidden: boolean }) {
   const onHold = a.available_balance != null && a.ledger_balance != null ? a.ledger_balance - a.available_balance : 0;
+  const tilt = useTilt();
   return (
     <motion.div layoutId={accountLayoutId(a.account_id)} transition={spring.shared} whileHover={{ y: -4 }} whileTap={{ scale: 0.97 }}
-      className={cn("w-[84%] shrink-0 snap-start overflow-hidden rounded-panel sm:w-[330px] lg:w-auto", accountTone(a))}>
+      style={tilt.style} onPointerMove={tilt.move} onPointerLeave={tilt.leave}
+      className={cn("relative w-[84%] shrink-0 snap-start overflow-hidden rounded-panel sm:w-[330px] lg:w-auto", accountTone(a))}>
+      {tilt.light && <motion.span aria-hidden className="pointer-events-none absolute inset-0 z-10" style={{ backgroundImage: tilt.light }} />}
       <Link to={`/accounts/${a.account_id}`} className="cover relative flex h-[196px] flex-col p-6">
         <Mark variant="bare" title={null} className="pointer-events-none absolute -right-12 -bottom-14 size-[210px] opacity-[0.08]" />
         <div className="relative flex items-center justify-between text-sm font-semibold">

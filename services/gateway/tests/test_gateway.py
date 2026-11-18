@@ -60,6 +60,9 @@ class Upstreams:
                 "Content-Type": "application/pdf", "Content-Disposition": 'inline; filename="pan.pdf"',
                 "Content-Security-Policy": "sandbox; default-src 'none'", "Cache-Control": "no-store",
                 "Set-Cookie": "leak=1", "X-Internal-Debug": "secret"})
+        if service == "ratelimit" and request.url.path == "/v1/check":
+            self.lookups = getattr(self, "lookups", 0) + 1
+            return httpx.Response(200, json={"allowed": self.lookups <= 2, "retry_after": 42})
         if service == "identity" and request.url.path.endswith("/lockdown"):
             return httpx.Response(200, json={"sessions_ended": 2})
         if service == "fraud" and request.url.path == "/v1/lockdown":
@@ -304,6 +307,17 @@ def test_public_statement_check_is_rate_limited_per_address(client, up, monkeypa
     assert blocked.json()["error"] == "TOO_MANY_REQUESTS" and int(blocked.headers["retry-after"]) >= 1
     assert client.post("/api/statements/verify", content=b"%PDF-x", headers=other).status_code == 200   # someone else is fine
     assert len([c for c in up.calls if c["path"] == "/v1/statements/verify-file"]) == 11
+
+
+def test_payee_name_lookups_are_limited_per_customer(client, up):
+    """Lookups show full names, so the Rate Limit Coordinator caps them per customer."""
+    codes = [client.get(f"/api/payees/lookup/{ref}", headers=customer()).status_code
+             for ref in ("500100000016", "riya@unbeatable", "9876543210")]
+    assert codes == [200, 200, 429]
+    r = client.get("/api/aliases/riya@unbeatable", headers=customer())
+    assert r.status_code == 429 and r.headers["retry-after"] == "42"
+    check = [c for c in up.calls if c["service"] == "ratelimit"][-1]
+    assert b'"policy_set":"lookups"' in check["body"].replace(b" ", b"") and RIYA.encode() in check["body"]
 
 
 # ------------------------------------------------------------------ sessions and PINs

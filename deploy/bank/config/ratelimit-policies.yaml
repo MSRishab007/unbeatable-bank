@@ -25,3 +25,7 @@ policy_sets:
       - { limit: 5, window: 300 }
     ip:
       - { limit: 30, window: 60 }
+  lookups:                          # payee name lookups: stops anyone harvesting names
+    customer:                       # by trying account numbers or mobile numbers
+      - { limit: 15, window: 60 }
+      - { limit: 60, window: 3600 }

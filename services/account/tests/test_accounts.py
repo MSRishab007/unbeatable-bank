@@ -200,12 +200,12 @@ def test_event_chain_detects_tampering(conn, ledger, make_customer):
 # ------------------------------------------------------------------ payees & aliases
 
 
-def test_beneficiary_cooling_period_and_name_masking(conn, ledger, make_customer):
+def test_beneficiary_cooling_period_and_full_name(conn, ledger, make_customer):
     payer = make_customer()
     payee_acct = service.open_account(conn, ledger, product_type="SAVINGS",
                                       holder_ids=[make_customer("Arjun Kumar Mehta")], actor=ACTOR)
     b = service.add_beneficiary(conn, payer, payee_account_number=payee_acct["account_number"])
-    assert b["payee_name"] == "Arjun K**** M****"
+    assert b["payee_name"] == "Arjun Kumar Mehta"
     assert service.list_beneficiaries(conn, payer)[0]["in_cooling_period"]
     with pytest.raises(service.Conflict):
         service.add_beneficiary(conn, payer, payee_account_number=payee_acct["account_number"])
@@ -223,7 +223,7 @@ def test_alias_for_scan_to_pay(conn, ledger, make_customer):
     alias = f"riya{acct['account_number'][-4:]}"
     service.create_alias(conn, acct["account_id"], alias)
     resolved = service.resolve_alias(conn, f"{alias}@unbeatable")
-    assert resolved["account_id"] == acct["account_id"] and resolved["display_name"] == "Riya S*****"
+    assert resolved["account_id"] == acct["account_id"] and resolved["display_name"] == "Riya Sharma" and resolved["kind"] == "PAY_ID"
     with pytest.raises(service.AccountError):
         service.create_alias(conn, acct["account_id"], "x")
 
@@ -362,9 +362,10 @@ def test_payment_precheck(conn, ledger, make_customer):
                                         payee_ref=payee)
 
     own = check(mine2["account_number"])
-    assert own["auth"]["allowed"] and own["payee_trusted"]                      # own account
+    assert own["auth"]["allowed"] and own["payee_trusted"] and own["payee_own"]  # own account
     stranger = check(theirs["account_number"])
-    assert stranger["payee"]["display_name"] == "Arjun M****" and not stranger["payee_trusted"]
+    assert stranger["payee"]["display_name"] == "Arjun Mehta" and not stranger["payee_trusted"]
+    assert not stranger["payee_own"] and stranger["payee"]["kind"] == "ACCOUNT_NUMBER"
     service.add_beneficiary(conn, payer, payee_account_number=theirs["account_number"])
     assert not check(theirs["account_number"])["payee_trusted"]                 # saved, but still cooling
     conn.execute("UPDATE account.beneficiaries SET cooling_until = now() - interval '1 minute' "
@@ -375,3 +376,32 @@ def test_payment_precheck(conn, ledger, make_customer):
     assert check("nobody@unbeatable")["payee_error"] == "PAYEE_NOT_FOUND"
     assert service.precheck_payment(conn, customer_id=friend, from_account_id=mine["account_id"],
                                     payee_ref=theirs["account_number"])["auth"]["reason"] == "NOT_A_HOLDER"
+
+
+def test_pay_by_mobile_is_opt_in_and_uses_the_chosen_account(conn, ledger, make_customer):
+    cust = make_customer("Kabir Rao")
+    first = service.open_account(conn, ledger, product_type="SAVINGS", holder_ids=[cust], actor=ACTOR)
+    second = service.open_account(conn, ledger, product_type="CURRENT", holder_ids=[cust], actor=ACTOR)
+    phone = conn.execute("SELECT phone FROM account.customers WHERE customer_id = %s", (cust,)).fetchone()[0]
+    local = phone[3:]
+    with pytest.raises(service.NotFound):                     # off by default
+        service.lookup_payee(conn, local)
+    service.set_pay_by_mobile(conn, cust, enabled=True, receiving_account_id=None, actor=ACTOR)
+    found = service.lookup_payee(conn, f"+91 {local[:5]} {local[5:]}")
+    assert found["kind"] == "MOBILE" and found["display_name"] == "Kabir Rao"
+    assert found["account_id"] == first["account_id"]        # the first account opened, by default
+    service.set_pay_by_mobile(conn, cust, enabled=True, receiving_account_id=second["account_id"], actor=ACTOR)
+    assert service.lookup_payee(conn, "0" + local)["account_id"] == second["account_id"]
+    stranger = service.open_account(conn, ledger, product_type="SAVINGS", holder_ids=[make_customer()], actor=ACTOR)
+    with pytest.raises(service.AccountError):                 # can't receive on someone else's account
+        service.set_pay_by_mobile(conn, cust, enabled=True, receiving_account_id=stranger["account_id"], actor=ACTOR)
+    assert service.lookup_payee(conn, first["account_number"])["kind"] == "ACCOUNT_NUMBER"
+
+
+def test_an_account_frozen_for_fraud_cannot_receive(conn, ledger, make_customer):
+    mule = service.open_account(conn, ledger, product_type="SAVINGS", holder_ids=[make_customer()], actor=ACTOR)
+    other = service.open_account(conn, ledger, product_type="SAVINGS", holder_ids=[make_customer()], actor=ACTOR)
+    service.freeze_account(conn, ledger, mule["account_id"], reason="automatic: MULE_FAN_IN", actor=ACTOR)
+    service.freeze_account(conn, ledger, other["account_id"], reason="customer blocked everything", actor=ACTOR)
+    assert not service.lookup_by_number(conn, mule["account_number"])["can_receive"]
+    assert service.lookup_by_number(conn, other["account_number"])["can_receive"]   # money can still come in

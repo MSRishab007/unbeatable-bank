@@ -264,6 +264,28 @@ def resolve_alias(alias: str, conn=Depends(get_conn)):
     return service.resolve_alias(conn, alias)
 
 
+@app.get("/v1/payees/lookup/{ref}")
+def lookup_payee(ref: str, conn=Depends(get_conn)):
+    """Who is this? A pay ID, a mobile number (if its owner allows it) or an account number."""
+    return service.lookup_payee(conn, ref)
+
+
+class PayByMobileIn(BaseModel):
+    enabled: bool
+    receiving_account_id: UUID | None = None
+
+
+@app.get("/v1/customers/{customer_id}/pay-by-mobile")
+def get_pay_by_mobile(customer_id: UUID, conn=Depends(get_conn)):
+    return service.pay_by_mobile(conn, customer_id)
+
+
+@app.put("/v1/customers/{customer_id}/pay-by-mobile")
+def set_pay_by_mobile(customer_id: UUID, body: PayByMobileIn, conn=Depends(get_conn), actor=Depends(get_actor)):
+    return service.set_pay_by_mobile(conn, customer_id, enabled=body.enabled,
+                                     receiving_account_id=body.receiving_account_id, actor=actor)
+
+
 # ----------------------------------------------------------------- internal (other services only)
 
 

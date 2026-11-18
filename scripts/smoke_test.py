@@ -232,7 +232,8 @@ print("2. Payments (Gateway -> Intake -REST-> Account, -gRPC-> Rate limit, Risk,
 key = str(uuid.uuid4())
 r = pay(riya["H"], riya["account_id"], arjun["number"], 2_500 * RS, key=key)
 check("Rs 2,500 to Arjun: COMPLETED", r.status_code == 201 and r.json()["status"] == "COMPLETED", r.text)
-check("payee name is masked", r.json().get("to_display_name") == "Arjun M****", r.json().get("to_display_name"))
+check("payee's full name and how they were named", r.json().get("to_display_name") == "Arjun Mehta"
+      and r.json().get("payee_kind") == "ACCOUNT_NUMBER", r.json().get("to_display_name"))
 again = pay(riya["H"], riya["account_id"], arjun["number"], 2_500 * RS, key=key)
 check("same Idempotency-Key again: replayed, not charged twice",
       again.status_code == 200 and again.json()["txn_id"] == r.json()["txn_id"] and balance(riya) == 297_500 * RS,

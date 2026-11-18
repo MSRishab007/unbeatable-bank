@@ -6,6 +6,8 @@ import { toast } from "sonner";
 import { Empty, PageHead, Section, sectionLink } from "@/components/AppShell";
 import { Avatar, PaymentRow, PaymentSheet, Slip } from "@/components/Payment";
 import { Scanner } from "@/components/Scanner";
+import { AmountEntry } from "@/components/AmountEntry";
+import { Journey } from "@/components/Journey";
 import { SwipeButton } from "@/components/SwipeButton";
 import { Badge, Card, Skeleton } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -19,7 +21,10 @@ import { withPinContext } from "@/lib/session";
 import { payable, PRODUCT, type Payment } from "@/lib/types";
 import { cn, groupDigits, inr, toPaise, uuid, when } from "@/lib/utils";
 
-type Payee = { value: string; name: string };
+type PayeeKind = "ACCOUNT_NUMBER" | "PAY_ID" | "MOBILE";
+type Payee = { value: string; name: string; number: string; kind: PayeeKind };
+const KIND_LABEL: Record<PayeeKind, string> = { ACCOUNT_NUMBER: "Account number", PAY_ID: "Pay ID", MOBILE: "Mobile number" };
+const looksLikePayee = (v: string) => /^\d{12}$/.test(v) || v.includes("@") || /^(\+91|0)?[6-9]\d{9}$/.test(v);
 
 function AddPayee({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
   const [number, setNumber] = useState("");
@@ -78,6 +83,8 @@ export default function Pay() {
   const [note, setNote] = useState(params.get("note") || "");
   const [channel, setChannel] = useState(params.get("to") ? "QR_PAYMENT" : "TRANSFER");
   const [result, setResult] = useState<Payment | null>(null);
+  const [journey, setJourney] = useState<Payment | null>(null);
+  const [picked, setPicked] = useState("");    // the person tapped in "recent": their avatar flies into place
   const [error, setError] = useState("");
   const [addPayee, setAddPayee] = useState(false);
   const [opened, setOpened] = useState<Payment | null>(null);
@@ -91,21 +98,23 @@ export default function Pay() {
   useEffect(() => { key.current = uuid(); }, [to, amount, from, note]);
   useEffect(() => { if (hash === "#payees") document.getElementById("payees")?.scrollIntoView({ behavior: "smooth" }); }, [hash]);
 
-  // Look the payee up as they type: a 12-digit number or a pay ID.
+  // Look the payee up as they type: an account number, a pay ID or a mobile number, in one box.
   useEffect(() => {
-    const v = to.trim().replace(/\s/g, "");
+    const v = to.trim().replace(/[\s-]/g, "");
     setPayee(null);
-    if (!v || !(/^\d{12}$/.test(v) || /^[\w.\-]+@unbeatable$/i.test(v) || v.includes("@"))) return setLookup({});
+    if (!v || !looksLikePayee(v)) return setLookup({});
     let live = true;
     setLookup({ busy: true });
     const t = setTimeout(async () => {
       try {
-        const r = v.includes("@") ? await get(`/api/aliases/${encodeURIComponent(v.toLowerCase())}`) : await get(`/api/payees/${encodeURIComponent(v)}`);
+        const r = await get(`/api/payees/lookup/${encodeURIComponent(v.includes("@") ? v.toLowerCase() : v)}`);
         if (!live) return;
-        if (!r.can_receive) setLookup({ error: `${r.display_name} can't receive money right now.` });
-        else { setPayee({ value: v.includes("@") ? v.toLowerCase() : v, name: r.display_name }); setLookup({}); }
+        if (!r.can_receive) setLookup({ error: `${r.display_name}'s account can't receive payments. If someone asked you to pay it, it may be a scam.` });
+        else { setPayee({ value: v.includes("@") ? v.toLowerCase() : v, name: r.display_name, number: r.account_number, kind: r.kind || "ACCOUNT_NUMBER" }); setLookup({}); }
       } catch (e) {
-        if (live) setLookup({ error: (e as ApiError).status === 404 ? "No account matches that. Check the number or pay ID." : (e as Error).message });
+        const err = e as ApiError;
+        if (live) setLookup({ error: err.status === 404 ? (/^(\+91|0)?[6-9]\d{9}$/.test(v) ? "No one receives payments on this mobile number." : "No account matches that. Check the number or pay ID.")
+          : err.status === 429 ? "You've checked a lot of names just now. Wait a minute, or pay a saved payee." : err.message });
       }
     }, 350);
     return () => { live = false; clearTimeout(t); };
@@ -124,7 +133,7 @@ export default function Pay() {
       const r = await withPinContext(`Pay ${inr(paise)} to ${payee!.name}`, () =>
         api<{ status: number; data: any }>("POST", "/api/payments", body, { headers: { "Idempotency-Key": key.current }, full: true, accept: [422] }));
       if (!r.data?.txn_id) throw new ApiError(r.status, messageOf(r.data, r.status));
-      setResult(r.data);
+      setJourney(r.data);          // the payment's trip through the six checks, then the slip
       key.current = uuid();
       refreshMoney();
     } catch (ex) {
@@ -145,7 +154,7 @@ export default function Pay() {
   }
 
   function reset(keepPayee = false) {
-    setResult(null); setAmount(""); setNote(""); setError("");
+    setResult(null); setJourney(null); setAmount(""); setNote(""); setError("");
     if (!keepPayee) { setTo(""); setPayee(null); }
     setChannel("TRANSFER");
   }
@@ -176,7 +185,7 @@ export default function Pay() {
 
   return (
     <div>
-      <PageHead title="Pay" lead="Any Unbeatable Bank account, by number, pay ID or QR code."
+      <PageHead title="Pay" lead="Anyone at Unbeatable Bank, by account number, pay ID, mobile number or QR code."
         actions={<>
           <Button variant="night" size="sm" id="scan" onClick={() => setScan(true)}><ScanLine /> Scan a QR code</Button>
           <Button asChild variant="secondary" size="sm"><Link to="/receive"><QrCode /> Receive</Link></Button>
@@ -184,8 +193,10 @@ export default function Pay() {
 
       <div className="grid grid-cols-[minmax(0,1fr)] items-start gap-8 lg:grid-cols-[minmax(0,460px)_minmax(0,1fr)]">
         <Card className="relative overflow-hidden rounded-panel p-4 sm:p-6" id="pay-card">
-          {result ? (
-            <motion.div key="result" id="payment-result" aria-live="polite" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={spring.page}>
+          {journey && !result ? (
+            <Journey p={journey} onDone={() => { setResult(journey); setJourney(null); }} />
+          ) : result ? (
+            <motion.div key="result" id="payment-result" aria-live="polite" className="print-in">
               <Slip p={result} fresh onChange={setResult} />
               <div className="mt-6 grid grid-cols-2 gap-3">
                 <Button variant="secondary" size="lg" onClick={() => reset(true)}>Pay {payee?.name.split(" ")[0] || "them"} again</Button>
@@ -198,10 +209,11 @@ export default function Pay() {
                 {payee ? (
                   <motion.div key="payee" initial={{ opacity: 0, scale: 0.92 }} animate={{ opacity: 1, scale: 1 }} transition={spring.bouncy}
                     className="flex items-center gap-3 rounded-card bg-bg p-3 pr-2">
-                    <Avatar name={payee.name} />
+                    <motion.span layoutId={picked === payee.number ? `who-${payee.number}` : undefined} transition={spring.shared}><Avatar name={payee.name} /></motion.span>
                     <div className="min-w-0 flex-1">
                       <p className="truncate font-semibold">{payee.name}</p>
-                      <p className="flex items-center gap-1 truncate text-[13px] font-medium text-success-text num"><BadgeCheck className="size-3.5 shrink-0" /> {payee.value.includes("@") ? payee.value : groupDigits(payee.value)}{channel === "QR_PAYMENT" ? ", from a QR code" : ""}</p>
+                      <p className="flex items-center gap-1 truncate text-[13px] font-medium text-success-text num"><BadgeCheck className="size-3.5 shrink-0" /> {payee.kind === "ACCOUNT_NUMBER" ? groupDigits(payee.value) : payee.kind === "MOBILE" ? `+91 ${payee.value.slice(-10, -5)} ${payee.value.slice(-5)}` : payee.value}</p>
+                      <span className="mt-1 inline-flex rounded-full bg-surface px-2 py-0.5 text-[11px] font-semibold text-ink-2">{channel === "QR_PAYMENT" ? "From a QR code" : KIND_LABEL[payee.kind]}{payee.kind !== "ACCOUNT_NUMBER" ? `, account ••${payee.number.slice(-4)}` : ""}</span>
                     </div>
                     <button type="button" aria-label="Change who you're paying" onClick={() => { setTo(""); setPayee(null); setChannel("TRANSFER"); }} className="press rounded-full p-2 text-muted hover:bg-surface hover:text-ink"><X className="size-5" /></button>
                   </motion.div>
@@ -209,7 +221,7 @@ export default function Pay() {
                   <motion.div key="lookup" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
                     <label htmlFor="payee" className="mb-1.5 block text-[13px] font-semibold text-ink-2">To</label>
                     <div className="relative">
-                      <Input id="payee" name="payee" autoComplete="off" placeholder="Account number or pay ID" value={to} className="pr-14"
+                      <Input id="payee" name="payee" autoComplete="off" placeholder="Account number, pay ID or mobile" value={to} className="pr-14"
                         onChange={(e) => { setTo(e.target.value); setChannel("TRANSFER"); }} autoFocus={!params.get("to") && !scan} aria-invalid={!!lookup.error} aria-describedby="payee-help" />
                       {lookup.busy ? <Loader2 className="absolute top-1/2 right-4 size-5 -translate-y-1/2 animate-spin text-muted" /> : (
                         <button type="button" aria-label="Scan a QR code" onClick={() => setScan(true)} className="press absolute top-1/2 right-1.5 flex size-9 -translate-y-1/2 items-center justify-center rounded-full bg-night text-on-night hover:bg-night-2">
@@ -223,9 +235,9 @@ export default function Pay() {
                     {recent.length > 0 && (
                       <div className="-mx-1 mt-3 flex gap-1 overflow-x-auto pb-1 no-scrollbar">
                         {recent.map((r) => (
-                          <button key={r.number} type="button" onClick={() => { setTo(r.number); setTimeout(() => amountRef.current?.focus(), 400); }}
+                          <button key={r.number} type="button" onClick={() => { setPicked(r.number); setTo(r.number); setTimeout(() => amountRef.current?.focus(), 400); }}
                             className="press flex w-[68px] shrink-0 flex-col items-center gap-1.5 rounded-field p-1.5 hover:bg-bg">
-                            <Avatar name={r.name} className="size-12" />
+                            <motion.span layoutId={`who-${r.number}`} transition={spring.shared}><Avatar name={r.name} className="size-12" /></motion.span>
                             <span className="w-full truncate text-center text-xs font-medium text-ink-2">{r.name.split(" ")[0]}</span>
                           </button>
                         ))}
@@ -236,14 +248,8 @@ export default function Pay() {
 
               {/* -------------------------------- how much */}
               <div className="mt-7 text-center">
-                <label htmlFor="amount" className="text-[13px] font-semibold text-muted">Amount</label>
-                <div className="mt-1 flex items-baseline justify-center gap-1 font-display font-semibold tracking-[-0.04em]">
-                  <span className={cn("text-[32px] transition-colors duration-base", paise ? "text-ink" : "text-muted")}>₹</span>
-                  <input ref={amountRef} id="amount" name="amount" inputMode="decimal" autoComplete="off" placeholder="0"
-                    value={amount} onChange={(e) => setAmount(e.target.value.replace(/[^\d.,]/g, ""))}
-                    style={{ width: `${Math.max(1, amount.length || 1) + 0.8}ch` }}
-                    className="max-w-full rounded-chip bg-transparent text-center text-[52px] leading-none outline-none placeholder:text-muted focus-visible:outline-none num" />
-                </div>
+                <p className="text-[13px] font-semibold text-muted" aria-hidden>Amount</p>
+                <div className="mt-2"><AmountEntry ref={amountRef} value={amount} onChange={setAmount} /></div>
                 <div className="mt-3 flex justify-center gap-2">
                   {[100, 500, 1000, 2000].map((v) => (
                     <button key={v} type="button" onClick={() => setAmount(String(v))} className="press rounded-full bg-bg px-3 py-1.5 text-[13px] font-semibold text-ink-2 hover:bg-sunken hover:text-ink num">

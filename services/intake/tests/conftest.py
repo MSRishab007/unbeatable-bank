@@ -117,7 +117,7 @@ class FakeAccounts:
         self.accounts[str(account_id)] = {
             "account_id": str(account_id), "account_number": number, "status": status,
             "product_type": product_type, "daily_limit": daily_limit, "per_txn_limit": per_txn_limit,
-            "idle_days": idle_days, "display_name": " ".join([first] + [p[0] + "*" * (len(p) - 1) for p in rest]),
+            "idle_days": idle_days, "display_name": name,
         }
         self.holders[str(account_id)] = {str(h) for h in holders}
         return account_id, number
@@ -153,7 +153,7 @@ class FakeAccounts:
     def precheck(self, customer_id, from_account_id, payee):
         self._check()
         out = {"auth": self._authorize(from_account_id, customer_id), "payee": None, "payee_error": None,
-               "payee_trusted": False}
+               "payee_trusted": False, "payee_own": False}
         if not out["auth"]["allowed"]:
             return out
         number = self.aliases.get(payee) if "@" in payee else payee
@@ -167,6 +167,8 @@ class FakeAccounts:
                 out["payee_error"] = "PAYEE_NOT_FOUND"
             else:
                 own = str(customer_id) in self.holders[out["payee"]["account_id"]]
+                out["payee_own"] = own
+                out["payee"]["kind"] = "PAY_ID" if "@" in payee else "ACCOUNT_NUMBER"
                 out["payee_trusted"] = own or (str(customer_id), number) in self.trusted
         return out
 

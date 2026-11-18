@@ -44,7 +44,11 @@ log = logging.getLogger("intake")
 
 TXN_TOPIC = "txn-events"
 CASH_ACCOUNT = UUID("00000000-0000-0000-0000-000000000001")
-NEW_PAYEE_LIMIT = int(os.getenv("NEW_PAYEE_LIMIT_PAISE", "1000000"))  # Rs 10,000
+NEW_PAYEE_LIMIT = int(os.getenv("NEW_PAYEE_LIMIT_PAISE", "1000000"))  # Rs 10,000 per payment
+NEW_PAYEE_DAILY_LIMIT = int(os.getenv("NEW_PAYEE_DAILY_LIMIT_PAISE", "5000000"))  # Rs 50,000 a day to one payee
+# A payee becomes trusted once it is saved and past its cooling period, or this long after
+# the first completed payment to it.
+TRUST_AFTER_FIRST_PAYMENT = "interval '24 hours'"
 CHALLENGE_TTL_SECONDS = 600
 IST_DAY_START = "(date_trunc('day', now() AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'Asia/Kolkata')"
 
@@ -65,10 +69,13 @@ DECLINE_MESSAGES = {
     "NEEDS_ALL_HOLDERS": "All holders must approve payments from this account.",
     "INVALID_PAYEE": "The payee account number is invalid. Please check for typos.",
     "PAYEE_NOT_FOUND": "We couldn't find that payee.",
-    "PAYEE_CANNOT_RECEIVE": "The payee account cannot receive money.",
+    "PAYEE_CANNOT_RECEIVE": "This account can't receive payments. If someone asked you to pay it, it may be a scam.",
     "SAME_ACCOUNT": "You can't send money to the same account.",
     "PER_TXN_LIMIT_EXCEEDED": "This amount is above the per-transaction limit for this account.",
-    "NEW_PAYEE_LIMIT_EXCEEDED": "New payees can receive at most Rs 10,000 per payment for the first 24 hours.",
+    "NEW_PAYEE_LIMIT_EXCEEDED": ("A new payee can receive at most Rs 10,000 per payment, until 24 hours after "
+                                 "your first payment to them."),
+    "NEW_PAYEE_DAILY_LIMIT_EXCEEDED": ("A new payee can receive at most Rs 50,000 a day from you, until 24 hours "
+                                       "after your first payment to them."),
     "DAILY_LIMIT_EXCEEDED": "This payment would exceed today's limit for this account.",
     "CUSTOMER_DAILY_LIMIT_EXCEEDED": "This payment would exceed your daily transfer limit.",
     "INSUFFICIENT_FUNDS": "Insufficient balance.",
@@ -408,13 +415,15 @@ def _screen(conn: psycopg.Connection, deps: Deps, txn: dict) -> dict:
         raise _Decline("SAME_ACCOUNT")
     if txn["amount"] > auth["per_txn_limit"]:
         raise _Decline("PER_TXN_LIMIT_EXCEEDED")
-    if txn["amount"] > NEW_PAYEE_LIMIT and not pre["payee_trusted"]:
+    own = bool(pre.get("payee_own"))
+    trusted = bool(pre["payee_trusted"]) or own or _paid_before(conn, txn["customer_id"], payee["account_id"])
+    if txn["amount"] > NEW_PAYEE_LIMIT and not trusted:
         raise _Decline("NEW_PAYEE_LIMIT_EXCEEDED")
 
     risk = deps.risk.evaluate(
         txn_id=str(txn["txn_id"]), customer_id=customer, from_account_id=account,
         to_account_id=str(payee["account_id"]), amount=txn["amount"], channel=txn["channel"],
-        device_id=txn["device_id"] or "", ip=txn["ip"] or "", payee_trusted=bool(pre["payee_trusted"]),
+        device_id=txn["device_id"] or "", ip=txn["ip"] or "", payee_trusted=trusted,
         account_idle_days=int(auth.get("idle_days") or 0))
 
     with _cur(conn) as cur:
@@ -422,11 +431,13 @@ def _screen(conn: psycopg.Connection, deps: Deps, txn: dict) -> dict:
             """
             UPDATE intake.transactions
             SET to_account_id = %s, to_account_number = %s, to_display_name = %s, payee_trusted = %s,
+                payee_kind = %s, own_transfer = %s,
                 limits = %s, risk_decision = %s, risk_score = %s, risk_reasons = %s, updated_at = now()
             WHERE txn_id = %s AND status = 'PROCESSING'
             RETURNING *
             """,
-            (payee["account_id"], payee["account_number"], payee["display_name"], pre["payee_trusted"],
+            (payee["account_id"], payee["account_number"], payee["display_name"], trusted,
+             payee.get("kind") or ("PAY_ID" if "@" in txn["payee_ref"] else "ACCOUNT_NUMBER"), own,
              Jsonb({"daily_limit": auth["daily_limit"], "customer_daily_limit": auth["daily_transfer_limit"]}),
              risk.decision, risk.score, Jsonb(risk.reasons), txn["txn_id"]),
         )
@@ -444,9 +455,24 @@ def _screen(conn: psycopg.Connection, deps: Deps, txn: dict) -> dict:
     return saved
 
 
+def _paid_before(conn: psycopg.Connection, customer_id: UUID, payee_account_id) -> bool:
+    """Has this customer completed a payment to this account at least 24 hours ago?"""
+    row = conn.execute(
+        f"SELECT EXISTS (SELECT 1 FROM intake.transactions WHERE customer_id = %s AND to_account_id = %s "
+        f"AND status = 'COMPLETED' AND created_at <= now() - {TRUST_AFTER_FIRST_PAYMENT})",
+        (customer_id, payee_account_id)).fetchone()
+    return bool(row[0])
+
+
 def _reserve(conn: psycopg.Connection, txn: dict) -> dict:
     """Step 7: daily-limit check and reservation, serialised per customer and per account."""
     limits = txn["limits"] or {}
+    if txn["own_transfer"]:              # between the customer's own accounts: no daily limit applies
+        with _cur(conn) as cur:
+            cur.execute("UPDATE intake.transactions SET reserved = true, updated_at = now() "
+                        "WHERE txn_id = %s AND status = 'PROCESSING' RETURNING *", (txn["txn_id"],))
+            row = cur.fetchone()
+        return row or _load(conn, txn["txn_id"], None)
     with conn.transaction(), _cur(conn) as cur:
         # Fixed lock order (customer, then account) so two locks never deadlock.
         cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"cust:{txn['customer_id']}",))
@@ -455,20 +481,25 @@ def _reserve(conn: psycopg.Connection, txn: dict) -> dict:
             f"""
             SELECT
               COALESCE(SUM(amount) FILTER (WHERE from_account_id = %(acct)s), 0) AS account_used,
-              COALESCE(SUM(amount) FILTER (WHERE customer_id = %(cust)s), 0)     AS customer_used
+              COALESCE(SUM(amount) FILTER (WHERE customer_id = %(cust)s), 0)     AS customer_used,
+              COALESCE(SUM(amount) FILTER (WHERE customer_id = %(cust)s AND to_account_id = %(payee)s), 0)
+                                                                                 AS payee_used
             FROM intake.transactions
             WHERE (from_account_id = %(acct)s OR customer_id = %(cust)s)
-              AND reserved AND status <> 'DECLINED'
+              AND reserved AND status <> 'DECLINED' AND NOT own_transfer
               AND txn_id <> %(txn)s
               AND created_at >= {IST_DAY_START}
             """,
-            {"acct": txn["from_account_id"], "cust": txn["customer_id"], "txn": txn["txn_id"]},
+            {"acct": txn["from_account_id"], "cust": txn["customer_id"], "txn": txn["txn_id"],
+             "payee": txn["to_account_id"]},
         )
         used = cur.fetchone()
         if used["account_used"] + txn["amount"] > limits.get("daily_limit", 0):
             raise _Decline("DAILY_LIMIT_EXCEEDED")
         if used["customer_used"] + txn["amount"] > limits.get("customer_daily_limit", 0):
             raise _Decline("CUSTOMER_DAILY_LIMIT_EXCEEDED")
+        if not txn["payee_trusted"] and used["payee_used"] + txn["amount"] > NEW_PAYEE_DAILY_LIMIT:
+            raise _Decline("NEW_PAYEE_DAILY_LIMIT_EXCEEDED")
         cur.execute(
             "UPDATE intake.transactions SET reserved = true, updated_at = now() "
             "WHERE txn_id = %s AND status = 'PROCESSING' RETURNING *",

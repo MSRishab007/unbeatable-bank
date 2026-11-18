@@ -11,6 +11,8 @@ in the SAFE state (money blocked rather than wrongly allowed):
 from __future__ import annotations
 
 import hashlib
+import logging
+import re
 import json
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -28,6 +30,8 @@ BENEFICIARY_COOLING = timedelta(hours=24)
 LIMIT_RAISE_DELAY = timedelta(hours=24)
 MAX_NOMINEES = 4
 NOMINEE_RELATIONS = ("SPOUSE", "CHILD", "PARENT", "SIBLING", "OTHER")
+
+log = logging.getLogger(__name__)
 
 
 class AccountError(Exception):
@@ -355,14 +359,25 @@ def list_customer_accounts(conn: psycopg.Connection, customer_id: UUID) -> list[
         return cur.fetchall()
 
 
+# A freeze for fraud also stops money coming in: a victim must not be able to keep paying a mule.
+FRAUD_FREEZE_PREFIXES = ("automatic:", "fraud confirmed")
+
+
+def _receivable(status: str, freeze_reason: str | None) -> bool:
+    if status in ("ACTIVE", "DORMANT"):
+        return True
+    return status == "FROZEN" and not (freeze_reason or "").lower().startswith(FRAUD_FREEZE_PREFIXES)
+
+
 def lookup_by_number(conn: psycopg.Connection, account_number: str) -> dict:
-    """Payee name confirmation before paying. Returns a masked name only."""
+    """Payee name confirmation before paying: the holder's full registered name, as payment
+    apps show it. The gateway rate-limits these lookups so names can't be harvested."""
     if not is_valid_account_number(account_number):
         raise AccountError("invalid account number (check digit failed)")
     with _cur(conn) as cur:
         cur.execute(
             """
-            SELECT a.account_id, a.account_number, a.status, c.full_name
+            SELECT a.account_id, a.account_number, a.status, a.freeze_reason, c.full_name
             FROM account.accounts a
             JOIN account.account_holders h ON h.account_id = a.account_id
                  AND h.role = 'PRIMARY' AND h.removed_at IS NULL
@@ -375,8 +390,80 @@ def lookup_by_number(conn: psycopg.Connection, account_number: str) -> dict:
     if row is None or row["status"] == "CLOSED":
         raise NotFound("account not found")
     return {"account_id": row["account_id"], "account_number": row["account_number"],
-            "display_name": mask_name(row["full_name"]),
-            "can_receive": row["status"] in ("ACTIVE", "DORMANT", "FROZEN")}
+            "display_name": row["full_name"], "kind": "ACCOUNT_NUMBER",
+            "can_receive": _receivable(row["status"], row["freeze_reason"])}
+
+
+def normalise_mobile(ref: str) -> str | None:
+    """'+91 98765 43210', '09876543210' or '9876543210' -> '+919876543210'; anything else -> None."""
+    digits = re.sub(r"[\s-]", "", ref)
+    digits = digits[3:] if digits.startswith("+91") else digits[1:] if len(digits) == 11 and digits[0] == "0" else digits
+    return f"+91{digits}" if re.fullmatch(r"[6-9]\d{9}", digits) else None
+
+
+def resolve_mobile(conn: psycopg.Connection, mobile: str) -> dict:
+    """The account a customer receives on by mobile number, if they have turned it on."""
+    phone = normalise_mobile(mobile)
+    if phone is None:
+        raise AccountError("not a valid Indian mobile number")
+    with _cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT a.account_number
+            FROM account.customers c
+            JOIN account.account_holders h ON h.customer_id = c.customer_id
+                 AND h.role = 'PRIMARY' AND h.removed_at IS NULL
+            JOIN account.accounts a ON a.account_id = h.account_id
+            WHERE c.phone = %s AND c.pay_by_mobile AND a.status IN ('ACTIVE', 'DORMANT')
+            ORDER BY (a.account_id = c.receiving_account_id) DESC, a.opened_at, a.account_number
+            LIMIT 1
+            """,
+            (phone,),
+        )
+        row = cur.fetchone()
+    if row is None:   # unknown number, not opted in, or no account that can receive: one answer for all
+        raise NotFound("no one receives payments on this mobile number")
+    return {**lookup_by_number(conn, row["account_number"]), "kind": "MOBILE"}
+
+
+def lookup_payee(conn: psycopg.Connection, ref: str) -> dict:
+    """One box for every way to name a payee: pay ID, mobile number or account number."""
+    ref = ref.strip()
+    if "@" in ref:
+        return resolve_alias(conn, ref)
+    if normalise_mobile(ref) and not re.fullmatch(r"\d{12}", ref):
+        return resolve_mobile(conn, ref)
+    return lookup_by_number(conn, re.sub(r"\s", "", ref))
+
+
+def pay_by_mobile(conn: psycopg.Connection, customer_id: UUID) -> dict:
+    with _cur(conn) as cur:
+        cur.execute("SELECT phone, pay_by_mobile, receiving_account_id FROM account.customers "
+                    "WHERE customer_id = %s", (customer_id,))
+        row = cur.fetchone()
+    if row is None:
+        raise NotFound("customer not found")
+    return {"enabled": row["pay_by_mobile"], "mobile": row["phone"],
+            "receiving_account_id": row["receiving_account_id"]}
+
+
+def set_pay_by_mobile(conn: psycopg.Connection, customer_id: UUID, *, enabled: bool,
+                      receiving_account_id: UUID | None, actor: str) -> dict:
+    with conn.transaction(), _cur(conn) as cur:
+        if receiving_account_id is not None:
+            cur.execute(
+                "SELECT 1 FROM account.account_holders h JOIN account.accounts a USING (account_id) "
+                "WHERE h.account_id = %s AND h.customer_id = %s AND h.role = 'PRIMARY' "
+                "AND h.removed_at IS NULL AND a.status <> 'CLOSED'", (receiving_account_id, customer_id))
+            if cur.fetchone() is None:
+                raise AccountError("you can only receive on an open account that you hold")
+        cur.execute(
+            "UPDATE account.customers SET pay_by_mobile = %s, receiving_account_id = %s "
+            "WHERE customer_id = %s RETURNING 1", (enabled, receiving_account_id, customer_id))
+        if cur.fetchone() is None:
+            raise NotFound("customer not found")
+        log.info("customer %s turned pay by mobile %s (by %s)", customer_id, "on" if enabled else "off", actor)
+    return pay_by_mobile(conn, customer_id)
 
 
 def mask_name(full_name: str) -> str:
@@ -431,11 +518,11 @@ def precheck_payment(conn: psycopg.Connection, *, customer_id: UUID, from_accoun
     may the customer debit the account, who is the payee, and is the payee trusted
     (the customer's own account, or a saved payee past its cooling period)."""
     auth = authorize(conn, from_account_id, customer_id, touch=True)
-    out: dict = {"auth": auth, "payee": None, "payee_error": None, "payee_trusted": False}
+    out: dict = {"auth": auth, "payee": None, "payee_error": None, "payee_trusted": False, "payee_own": False}
     if not auth["allowed"]:
         return out
     try:
-        payee = resolve_alias(conn, payee_ref) if "@" in payee_ref else lookup_by_number(conn, payee_ref)
+        payee = lookup_payee(conn, payee_ref)
     except NotFound:
         out["payee_error"] = "PAYEE_NOT_FOUND"
         return out
@@ -447,14 +534,19 @@ def precheck_payment(conn: psycopg.Connection, *, customer_id: UUID, from_accoun
         cur.execute(
             """
             SELECT EXISTS (SELECT 1 FROM account.account_holders
-                           WHERE account_id = %(payee)s AND customer_id = %(cust)s AND removed_at IS NULL)
-                OR EXISTS (SELECT 1 FROM account.beneficiaries
+                           WHERE account_id = %(payee)s AND customer_id = %(cust)s AND removed_at IS NULL) AS own,
+                   EXISTS (SELECT 1 FROM account.beneficiaries
                            WHERE customer_id = %(cust)s AND payee_account_number = %(number)s
-                             AND removed_at IS NULL AND cooling_until <= now()) AS trusted
+                             AND removed_at IS NULL AND cooling_until <= now()) AS saved
             """,
             {"payee": payee["account_id"], "cust": customer_id, "number": payee["account_number"]},
         )
-        out["payee_trusted"] = cur.fetchone()["trusted"]
+        row = cur.fetchone()
+        # A transfer between the customer's own accounts is always trusted and, in Intake,
+        # does not use up the daily limits. Intake also trusts a payee 24 h after the first
+        # completed payment to them, which it can see in its own records.
+        out["payee_own"] = row["own"]
+        out["payee_trusted"] = row["own"] or row["saved"]
     return out
 
 
@@ -763,4 +855,4 @@ def resolve_alias(conn: psycopg.Connection, alias: str) -> dict:
         row = cur.fetchone()
     if row is None:
         raise NotFound("alias not found")
-    return {"alias": alias, **lookup_by_number(conn, row["account_number"])}
+    return {**lookup_by_number(conn, row["account_number"]), "alias": alias.strip().lower(), "kind": "PAY_ID"}

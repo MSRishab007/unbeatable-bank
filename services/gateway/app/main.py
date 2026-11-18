@@ -218,6 +218,23 @@ def over_limit(route: Route, ip: str) -> int:
     return 0
 
 
+async def over_quota(policy_set: str, customer_id: str) -> int:
+    """Seconds to wait if the customer has used up this policy set at the Rate Limit Coordinator.
+
+    Shared across gateway pods. If the coordinator can't be reached the lookup goes ahead:
+    a name lookup moves no money, so failing open is the safer choice for customers."""
+    try:
+        r = await _state["http"].post(f"{_state['upstreams']['ratelimit']}/v1/check", timeout=1.0,
+                                      json={"policy_set": policy_set,
+                                            "descriptors": [{"scope": "customer", "id": customer_id}]})
+        body = r.json() if r.status_code == 200 else {}
+    except (httpx.HTTPError, ValueError):
+        return 0
+    if body.get("allowed", True):
+        return 0
+    return max(1, int(body.get("retry_after") or 30))
+
+
 async def check_session(request: Request, claims: dict, path: str) -> JSONResponse | None:
     """Is the token's session still open, and unlocked? None if the request may go on."""
     sid = claims.get("sid")
@@ -431,6 +448,13 @@ async def proxy(request: Request, rest: str):
             wait = over_limit(route, client_ip(request))
             if wait:
                 response = error(429, "TOO_MANY_REQUESTS", f"too many requests; try again in {wait} seconds")
+                response.headers["Retry-After"] = str(wait)
+                return response
+        if route.quota and claims is not None:
+            wait = await over_quota(route.quota, claims["sub"])
+            if wait:
+                response = error(429, "TOO_MANY_REQUESTS",
+                                 f"too many lookups; try again in {wait} seconds, or pay a saved payee")
                 response.headers["Retry-After"] = str(wait)
                 return response
         params = match.groupdict()

@@ -31,6 +31,7 @@ class Route:
     owner: str | None = None
     limit: tuple[int, int] | None = None   # (requests, seconds) per client address, for public endpoints
     pin: str | None = None                 # "PAYMENT" | "APP"
+    quota: str | None = None               # Rate Limit Coordinator policy set, counted per customer
 
     def regex(self) -> re.Pattern:
         pattern = re.sub(r"\{(\w+):path\}", r"(?P<\1>.+)", self.path)
@@ -103,8 +104,13 @@ ROUTES: list[Route] = [
           owner="account"),
     Route("GET", "/api/accounts/{account_id}/transactions", "ledger", "/v1/accounts/{account_id}/entries",
           owner="account"),
-    Route("GET", "/api/payees/{account_number}", "account", "/v1/accounts/by-number/{account_number}"),
-    Route("GET", "/api/aliases/{alias}", "account", "/v1/aliases/{alias}"),
+    # Name lookups show the payee's full name, so each customer may make only so many.
+    Route("GET", "/api/payees/lookup/{ref}", "account", "/v1/payees/lookup/{ref}", quota="lookups"),
+    Route("GET", "/api/payees/{account_number}", "account", "/v1/accounts/by-number/{account_number}",
+          quota="lookups"),
+    Route("GET", "/api/aliases/{alias}", "account", "/v1/aliases/{alias}", quota="lookups"),
+    Route("GET", "/api/me/pay-by-mobile", "account", "/v1/customers/{sub}/pay-by-mobile"),
+    Route("PUT", "/api/me/pay-by-mobile", "account", "/v1/customers/{sub}/pay-by-mobile", pin=APP),
 
     # ---- payments
     Route("POST", "/api/payments", "intake", "/v1/payments", pin=PAY),

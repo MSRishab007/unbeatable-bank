@@ -19,8 +19,8 @@ const json = (status: number, body?: unknown) =>
 const fail = (status: number, error: string, message: string, details?: unknown) => json(status, { error, message, details });
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const nameOf = (n: string) => fx.names[n] || (/^9/.test(n) ? null : `Account ${n.slice(-4)}`);
-const short = (name: string) => name.replace(/(\w+)\s+(\w)\w*$/, "$1 $2");
 let seq = 100;
+const payByMobile = { enabled: false, mobile: "+919876543210", receiving_account_id: null as string | null };
 
 function needPin(req: Request, kind: "PAYMENT" | "APP") {
   const pin = req.headers.get("X-Pin");
@@ -88,10 +88,20 @@ async function handle(req: Request, url: URL): Promise<Response> {
   }
 
   // ---- payees
-  if ((x = is("GET", /^\/payees\/(.+)$/)) || (x = is("GET", /^\/aliases\/(.+)$/))) {
-    const key = decodeURIComponent(x[1]!);
-    const n = key.includes("@") ? (key === "ravi@unbeatable" ? "Ravi Kumar" : null) : nameOf(key);
-    return n ? json(200, { display_name: short(n), can_receive: true }) : fail(404, "NOT_FOUND", "No account matches that.");
+  if ((x = is("GET", /^\/payees\/lookup\/(.+)$/)) || (x = is("GET", /^\/payees\/(.+)$/)) || (x = is("GET", /^\/aliases\/(.+)$/))) {
+    const key = decodeURIComponent(x[1]!).replace(/\s/g, "");
+    const mobile = /^(\+91|0)?[6-9]\d{9}$/.test(key) && !/^\d{12}$/.test(key);
+    const kind = key.includes("@") ? "PAY_ID" : mobile ? "MOBILE" : "ACCOUNT_NUMBER";
+    const number = kind === "ACCOUNT_NUMBER" ? key : "500100020001";
+    const n = kind === "PAY_ID" ? (key === "ravi@unbeatable" ? "Ravi Kumar" : null) : kind === "MOBILE" ? (key.endsWith("43210") ? "Ravi Kumar" : null) : nameOf(key);
+    return n ? json(200, { display_name: n, account_number: number, kind, can_receive: true })
+      : fail(404, "NOT_FOUND", kind === "MOBILE" ? "No one receives payments on this mobile number." : "No account matches that.");
+  }
+  if (is("GET", /^\/me\/pay-by-mobile$/)) return json(200, payByMobile);
+  if (is("PUT", /^\/me\/pay-by-mobile$/)) {
+    const no = needPin(req, "APP"); if (no) return no;
+    Object.assign(payByMobile, { enabled: !!body.enabled, receiving_account_id: body.receiving_account_id ?? null });
+    return json(200, payByMobile);
   }
   if (is("GET", /^\/me\/beneficiaries$/)) return json(200, fx.beneficiaries);
   if (is("POST", /^\/me\/beneficiaries$/)) {
@@ -109,9 +119,10 @@ async function handle(req: Request, url: URL): Promise<Response> {
     const no = needPin(req, "PAYMENT"); if (no) return no;
     await wait(500);
     const to = String(body.payee);
-    const name = to.includes("@") ? "Ravi Kumar" : nameOf(to) || to;
+    const kind = to.includes("@") ? "PAY_ID" : /^\d{12}$/.test(to) ? "ACCOUNT_NUMBER" : "MOBILE";
+    const name = kind === "ACCOUNT_NUMBER" ? nameOf(to) || to : "Ravi Kumar";
     const pay: Payment = { txn_id: crypto.randomUUID(), status: "COMPLETED", amount: body.amount, to_display_name: name, payee_ref: to,
-      to_account_number: to.includes("@") ? "500100020001" : to, from_account_id: body.from_account_id, note: body.note, created_at: new Date().toISOString(),
+      to_account_number: kind === "ACCOUNT_NUMBER" ? to : "500100020001", payee_kind: kind, from_account_id: body.from_account_id, note: body.note, created_at: new Date().toISOString(),
       risk_score: 4, risk_decision: "ALLOW", risk_reasons: [], channel: body.channel };
     if (body.amount > 5_000_000) Object.assign(pay, { status: "DECLINED", decline_code: "PER_TXN_LIMIT", risk_score: null,
       decline_message: "That's over your ₹50,000 limit for one payment. Raise the limit on the account page, or send less." });
@@ -123,7 +134,7 @@ async function handle(req: Request, url: URL): Promise<Response> {
   }
   if ((x = is("POST", /^\/payments\/([^/]+)\/confirm$/))) {
     const pay = fx.payments.find((v) => v.txn_id === x![1])!;
-    if (body.otp !== OTP) return fail(400, "BAD_CODE", "That code isn't right. Check your inbox and try again.");
+    if (body.otp !== OTP) return fail(400, "BAD_CODE", "That code isn't right. Check your email or phone and try again.");
     Object.assign(pay, { status: "COMPLETED", risk_decision: "ALLOW" });
     return json(200, pay);
   }

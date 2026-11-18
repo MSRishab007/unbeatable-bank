@@ -10,11 +10,12 @@ import { KycNotice } from "./Home";
 import { Badge, Card, Skeleton } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Modal } from "@/components/ui/dialog";
-import { Field, Input } from "@/components/ui/input";
+import { Field, Input, Select } from "@/components/ui/input";
 import { api, get } from "@/lib/api";
 import { lockNow, signOut } from "@/lib/auth";
-import { queryClient, useMe, usePins } from "@/lib/query";
-import { askSetPin, PIN_LEN, type PinKind } from "@/lib/session";
+import { queryClient, useAccounts, useMe, usePins } from "@/lib/query";
+import { askSetPin, PIN_LEN, withPinContext, type PinKind } from "@/lib/session";
+import { payable, PRODUCT } from "@/lib/types";
 import { cn, copyText, inr, when, words } from "@/lib/utils";
 
 const KYC_TYPES = ["image/jpeg", "image/png", "application/pdf"];
@@ -193,6 +194,48 @@ function Documents() {
   );
 }
 
+/** Opt-in: let people pay you by your mobile number, into the account you choose. */
+function PayByMobile() {
+  const q = useQuery({ queryKey: ["pay-by-mobile"], queryFn: () => get("/api/me/pay-by-mobile") });
+  const accounts = useAccounts();
+  const [busy, setBusy] = useState(false);
+  const open = (accounts.data || []).filter((a) => payable(a) && a.my_role !== "JOINT" && a.status !== "CLOSED");
+  const s = q.data as { enabled: boolean; mobile: string; receiving_account_id: string | null } | undefined;
+  const receiving = s?.receiving_account_id || open[0]?.account_id || "";
+  async function save(enabled: boolean, account: string | null) {
+    setBusy(true);
+    try {
+      const r = await withPinContext(enabled ? "Turn on pay by mobile number" : "Turn off pay by mobile number",
+        () => api("PUT", "/api/me/pay-by-mobile", { enabled, receiving_account_id: account }));
+      queryClient.setQueryData(["pay-by-mobile"], r);
+      toast.success(enabled ? "People can now pay you by your mobile number." : "Pay by mobile number is off.");
+    } catch (e) { toast.error((e as Error).message); } finally { setBusy(false); }
+  }
+  if (!s) return <Skeleton className="h-24 rounded-card" />;
+  return (
+    <Card className="p-5">
+      <div className="flex items-start gap-4">
+        <div className="min-w-0 flex-1">
+          <p className="font-semibold">Let people pay me by mobile number</p>
+          <p className="mt-1 text-[13px] text-muted">Anyone who knows <b className="num">{s.mobile}</b> can pay you with it. They see your full name before paying. Off until you turn it on.</p>
+        </div>
+        <button type="button" role="switch" id="pay-by-mobile" aria-checked={s.enabled} disabled={busy || !open.length}
+          aria-label="Let people pay me by mobile number" onClick={() => save(!s.enabled, s.receiving_account_id)}
+          className={cn("press relative mt-1 h-7 w-12 shrink-0 rounded-full transition-colors duration-base disabled:opacity-50", s.enabled ? "bg-success" : "bg-sunken")}>
+          <span className={cn("absolute top-1 left-1 size-5 rounded-full bg-surface shadow transition-transform duration-base", s.enabled && "translate-x-5")} />
+        </button>
+      </div>
+      {s.enabled && open.length > 1 && (
+        <div className="mt-4"><Field label="Money comes into" htmlFor="receiving">
+          <Select id="receiving" value={receiving} disabled={busy} onChange={(e) => save(true, e.target.value)}>
+            {open.map((a) => <option key={a.account_id} value={a.account_id}>{PRODUCT[a.product_type]} ••{a.account_number.slice(-4)}</option>)}
+          </Select>
+        </Field></div>
+      )}
+    </Card>
+  );
+}
+
 export default function Profile() {
   const { hash } = useLocation();
   const me = useMe();
@@ -276,6 +319,10 @@ export default function Profile() {
             {m && <li className="flex items-center justify-between px-5 py-4 text-[15px]"><span className="text-muted">Daily transfer limit</span><b className="num">{inr(m.daily_transfer_limit)}</b></li>}
           </ul>
         </Card>
+      </Section>
+
+      <Section title="Receiving money">
+        <PayByMobile />
       </Section>
 
       <Section title="Identity documents" className="scroll-mt-24">

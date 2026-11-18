@@ -42,6 +42,8 @@ export type Payment = {
   decline_code?: string | null;
   decline_message?: string | null;
   risk_score?: number | null;
+  payee_kind?: "ACCOUNT_NUMBER" | "PAY_ID" | "MOBILE" | null;
+  own_transfer?: boolean;
   risk_decision?: string | null;
   risk_reasons?: string[];
   replayed?: boolean;

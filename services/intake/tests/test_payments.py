@@ -38,7 +38,7 @@ def send(conn, deps, riya, rupees, **kw):
 def test_payment_completes(conn, deps, balance, riya):
     txn, replayed = send(conn, deps, riya, 2_500, note="dinner", device_id="phone-1", ip="10.0.0.9")
     assert txn["status"] == "COMPLETED" and txn["journal_id"] and not replayed
-    assert txn["to_display_name"] == "Arjun M****" and txn["risk_decision"] == "ALLOW"
+    assert txn["to_display_name"] == "Arjun Mehta" and txn["risk_decision"] == "ALLOW"
     assert balance(riya["acct"]) == 97_500 * RS and balance(riya["payee_acct"]) == 2_500 * RS
     # every layer was consulted, with the right identifiers
     assert deps.limiter.calls[0]["device_id"] == "phone-1" and deps.limiter.calls[0]["ip"] == "10.0.0.9"
@@ -179,6 +179,34 @@ def test_new_payee_limit(conn, deps, accounts, riya):
     assert to(stranger_no, big)["status"] == "COMPLETED"
 
 
+def test_new_payee_daily_total_and_trust_after_a_day(conn, deps, accounts, riya):
+    stranger = accounts.customer()
+    _, stranger_no = accounts.account([stranger], name="Unknown Person")
+
+    def to(amount):
+        return pay(conn, deps, riya["cid"], riya["acct"], stranger_no, amount)[0]
+
+    for _ in range(5):                                             # Rs 10,000 at a time, five times
+        assert to(10_000 * RS)["status"] == "COMPLETED"
+    t = to(1 * RS)                                                 # the sixth would pass Rs 50,000 today
+    assert t["decline_code"] == "NEW_PAYEE_DAILY_LIMIT_EXCEEDED" and "Rs 50,000" in t["decline_message"]
+    assert t["payee_kind"] == "ACCOUNT_NUMBER"
+    conn.execute("UPDATE intake.transactions SET created_at = now() - interval '25 hours' "
+                 "WHERE customer_id = %s AND status = 'COMPLETED'", (riya["cid"],))
+    later = to(15_000 * RS)                                        # first payment was over a day ago
+    assert later["status"] == "COMPLETED" and later["payee_trusted"]
+
+
+def test_own_account_transfers_do_not_use_the_daily_limit(conn, deps, accounts, riya):
+    acct, _ = accounts.account([riya["cid"]], balance=200_000 * RS, daily_limit=60_000 * RS,
+                               per_txn_limit=50_000 * RS)
+    _, own_no = accounts.account([riya["cid"]], name="Riya Sharma")
+    moved = pay(conn, deps, riya["cid"], acct, own_no, 50_000 * RS)[0]
+    assert moved["status"] == "COMPLETED" and moved["own_transfer"]
+    assert pay(conn, deps, riya["cid"], acct, riya["payee_no"], 50_000 * RS)[0]["status"] == "COMPLETED"
+    assert pay(conn, deps, riya["cid"], acct, riya["payee_no"], 20_000 * RS)[0]["decline_code"] == "DAILY_LIMIT_EXCEEDED"
+
+
 # ------------------------------------------------------------------ daily limits
 
 
@@ -255,7 +283,7 @@ def test_challenge_then_otp_completes(conn, deps, balance, riya):
     assert txn["status"] == "CHALLENGE" and txn["next_action"] == "OTP_REQUIRED"
     assert balance(riya["acct"]) == 100_000 * RS                      # nothing moved yet
     assert deps.identity.issued == [(str(riya["cid"]), f"txn:{txn['txn_id']}",
-                                     "Confirm payment of Rs 30,000.00 to Arjun M****")]
+                                     "Confirm payment of Rs 30,000.00 to Arjun Mehta")]
     assert send(conn, deps, riya, 30_000, key=key) == (txn, True)      # a retry doesn't skip the OTP
 
     with pytest.raises(service.InvalidOtp):

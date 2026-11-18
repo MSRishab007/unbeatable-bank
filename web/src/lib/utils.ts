@@ -62,3 +62,13 @@ export async function copyText(text: string) {
     return false;
   }
 }
+
+/**
+ * A size for a money figure that keeps it on one line in its box: the longer the formatted
+ * amount (₹1,00,10,15,287.00 is 18 characters), the smaller the type. `steps` pairs a
+ * maximum length with the classes to use; the last entry is for anything longer.
+ */
+export function moneySize(paise: number | null | undefined, steps: [number, string][]): string {
+  const len = paise == null ? 1 : inr(paise).length;
+  return (steps.find(([max]) => len <= max) ?? steps[steps.length - 1]!)[1];
+}

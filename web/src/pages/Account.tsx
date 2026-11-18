@@ -17,7 +17,7 @@ import { spring } from "@/lib/motion";
 import { queryClient } from "@/lib/query";
 import { withPinContext } from "@/lib/session";
 import { payable, PRODUCT, type Account, type Entry } from "@/lib/types";
-import { cn, copyText, day, groupDigits, inr, toPaise, when, words } from "@/lib/utils";
+import { cn, copyText, day, groupDigits, inr, moneySize, toPaise, when, words } from "@/lib/utils";
 
 type Balance = { available_balance: number; ledger_balance: number; accrued_interest?: number };
 
@@ -151,7 +151,7 @@ export default function AccountPage() {
               {PRODUCT[a.product_type]} account
               <StatusPill status={a.status} />
             </div>
-            <p className="relative mt-8 font-display text-[40px] font-semibold leading-none tracking-[-0.04em] num sm:text-[52px]">
+            <p className={cn("relative mt-8 whitespace-nowrap font-display font-semibold leading-none tracking-[-0.04em] num", moneySize(available, [[12, "text-[40px] sm:text-[52px]"], [15, "text-[32px] sm:text-[44px]"], [99, "text-[26px] sm:text-[36px]"]]))}>
               <CountUp id="available" paise={available} />
             </p>
             <p className="relative mt-2 text-sm font-medium">

@@ -16,7 +16,7 @@ import { api } from "@/lib/api";
 import { spring } from "@/lib/motion";
 import { queryClient, useAccounts, useMe, usePayments } from "@/lib/query";
 import { payable, PRODUCT, type Account, type Me, type Payment } from "@/lib/types";
-import { cn, groupDigits, reducedMotion } from "@/lib/utils";
+import { cn, groupDigits, moneySize, reducedMotion } from "@/lib/utils";
 
 const hour = new Date().getHours();
 const GREETING = hour < 5 ? "Up late" : hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
@@ -108,7 +108,7 @@ function AccountCard({ a, hidden }: { a: Account; hidden: boolean }) {
           <span>{PRODUCT[a.product_type]}{a.my_role === "JOINT" ? ", joint" : ""}</span>
           <StatusPill status={a.status} />
         </div>
-        <p className="balance relative mt-auto font-display text-[30px] font-semibold tracking-[-0.03em] num sm:text-[32px]">
+        <p className={cn("balance relative mt-auto whitespace-nowrap font-display font-semibold tracking-[-0.03em] num", moneySize(a.available_balance, [[10, "text-[30px] sm:text-[32px]"], [13, "text-[27px]"], [16, "text-[23px]"], [99, "text-[20px]"]]))}>
           {a.available_balance == null ? "—" : hidden ? HIDDEN : <CountUp paise={a.available_balance} />}
         </p>
         <div className="relative mt-1.5 flex items-center justify-between text-[13px] font-medium">
@@ -146,7 +146,7 @@ export default function Home() {
           <div className="min-w-0">
             <h1 className="text-[15px] font-medium text-muted">{GREETING}{first ? `, ${first}` : ""}</h1>
             {accounts.isLoading ? <Skeleton className="mt-2 h-11 w-56" /> : (
-              <p className="mt-1 font-display text-[34px] font-semibold leading-none tracking-[-0.04em] num sm:text-[44px]">
+              <p className={cn("mt-1 whitespace-nowrap font-display font-semibold leading-none tracking-[-0.04em] num", moneySize(total, [[12, "text-[34px] sm:text-[44px]"], [15, "text-[30px] sm:text-[40px]"], [99, "text-[25px] sm:text-[36px]"]]))}>
                 {hidden ? HIDDEN : <CountUp paise={total} />}
               </p>
             )}

@@ -1,0 +1,8 @@
+Unbeatable Bank - Scenario S17, Banking Transaction Monitoring
+
+GitHub repository: https://github.com/MSRishab007/unbeatable-bank
+Submitted version: tag FinalSubmission
+  https://github.com/MSRishab007/unbeatable-bank/tree/FinalSubmission
+
+Live site: https://unbeatable-bank.duckdns.org
+Deployment guide: docs/DEPLOY.md in the repository

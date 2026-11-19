@@ -1,0 +1,177 @@
+UNBEATABLE BANK - DEMO COMMANDS
+Run from the repository folder:  cd unbeatable-bank
+
+------------------------------------------------------------------
+1. START THE CLUSTER (if not already up)
+------------------------------------------------------------------
+make up NODES=3
+
+------------------------------------------------------------------
+2. START FLINK (retry the same command if it fails on a network error)
+------------------------------------------------------------------
+TF_VAR_flink_idle_delete_minutes=180 make flink-up NODES=3
+
+------------------------------------------------------------------
+3. CHECK THAT EVERYTHING IS UP
+------------------------------------------------------------------
+make status                                          # ArgoCD apps, pods, HPAs, certificate
+make url                                             # public address of the bank
+gcloud dataproc clusters list --region=us-central1   # ub-flink should be RUNNING
+make smoke                                           # end-to-end check
+
+------------------------------------------------------------------
+4. CHECK THAT THE FLINK JOB IS RUNNING
+------------------------------------------------------------------
+gcloud compute ssh ub-flink-m --zone=us-central1-a --command="yarn application -list"
+# Expect audit-analytics RUNNING. Use the zone shown by "clusters list" if different.
+
+------------------------------------------------------------------
+5. WARM UP (fraud personas, including the mule ring caught by Flink)
+------------------------------------------------------------------
+make simulate ARGS=--with-flink
+
+------------------------------------------------------------------
+6. LOGS OF ONE SERVICE (live)
+------------------------------------------------------------------
+make logs S=intake
+# other services: gateway, risk, identity, account, ledger, fraud, ratelimit, deposits
+kubectl -n bank logs statefulset/dynastore --tail=50
+
+------------------------------------------------------------------
+7. CENTRALISED LOGS (Cloud Logging)
+------------------------------------------------------------------
+# All bank services
+gcloud logging read 'resource.type="k8s_container" AND resource.labels.namespace_name="bank"' --limit=20 --freshness=10m --format="value(timestamp,resource.labels.container_name,jsonPayload.message)"
+
+# Errors only, across every service
+gcloud logging read 'resource.type="k8s_container" AND resource.labels.namespace_name="bank" AND severity>=ERROR' --limit=20 --freshness=30m
+
+# Flink on Dataproc
+gcloud logging read 'resource.type="cloud_dataproc_cluster" AND log_id("yarn-userlogs")' --limit=20 --freshness=30m
+
+# Serverless Notification function
+gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="notification"' --limit=20 --freshness=30m
+
+# Same filters work in the console: Logging > Logs Explorer
+
+------------------------------------------------------------------
+8. DEMO TOOLS 
+------------------------------------------------------------------
+make grafana                  # Web Preview > port 3000
+make argocd                   # port 8081, prints the admin password
+kubectl -n bank get hpa -w    # watch autoscaling
+make loadtest                 # load test, about 10 minutes
+
+------------------------------------------------------------------
+9. INDEPENDENT MICROSERVICES 
+------------------------------------------------------------------
+kubectl -n bank get deployments
+kubectl -n bank rollout restart deployment/risk
+kubectl -n bank rollout status deployment/risk
+kubectl -n bank delete pod -l app=fraud --wait=false
+kubectl -n bank get pods -l app=fraud -w
+
+
+------------------------------------------------------------------
+10. Close
+------------------------------------------------------------------
+make down
+
+
+
+UNBEATABLE BANK - GRAFANA AND PROMETHEUS DEMO
+Run from the repository folder:  cd unbeatable-bank
+
+==================================================================
+PART A. GRAFANA (about 5 minutes, best while the load test runs)
+==================================================================
+
+1. Open Grafana
+   make grafana
+   Cloud Shell: Web Preview > Preview on port 3000
+   Own machine: http://localhost:3000   (no sign-in needed)
+   Dashboards > "Unbeatable Bank: overview"
+   Time range (top right): Last 15 minutes. Refresh: 10s.
+
+2. Start traffic (other terminals)
+   make loadtest
+   kubectl -n bank get hpa -w
+
+3. Walk the four rows, top to bottom
+
+   Row 1 - Service health (requirement h)
+     - Requests / second, Error rate (5xx), p95 latency, Bank pods running
+     - Requests per second by service: gateway -> intake -> risk
+     - gRPC calls per second, gRPC p95 latency: the payment path
+     Say: "Every service exposes Prometheus metrics, scraped every 15 seconds."
+
+   Row 2 - Autoscaling and cluster health (requirement c)
+     - HPA replicas (current vs desired): gateway, intake, risk go from 1 to several
+     - CPU by pod: why they scale (above 60% of the CPU request)
+     - Nodes ready, Node CPU used: three nodes with room to spare
+     - Pod restarts: should stay at zero
+
+   Row 3 - Payments, rate limiting and fraud (scenario S17)
+     - Payment decisions per second: completed, declined, held, challenged
+     - Decline reasons, Rate-limit decisions, Risk decisions
+     - Risk rules firing per second (best after: make simulate)
+     - Fraud alerts and cases
+
+   Row 4 - DynaStore and events (requirement f)
+     - DynaStore nodes seen alive, Peer liveness: 3 nodes, all 1
+     - Operations per second, Quorum p95 latency: milliseconds
+     - Hinted handoff: hints waiting, Repair events
+     - Outbox events published to Kafka: the events feeding Flink
+
+4. Optional: DynaStore failure, live in row 4
+   - Staff console > System: take one DynaStore node down
+   - Peer liveness drops to 0 for that node, Hints waiting rises,
+     payments keep succeeding in row 3
+   - Bring the node back: hints fall to 0, Repair events spike
+
+5. End of the load test
+   - k6 summary: thresholds passed
+   - A few minutes later: HPA replicas back towards 1
+
+==================================================================
+PART B. PROMETHEUS (about 3 minutes)
+==================================================================
+
+1. Open Prometheus
+   make prometheus
+   Cloud Shell: Web Preview > Change port > 9090
+   Own machine: http://localhost:9090
+
+2. Show what it scrapes
+   Status > Targets (newer versions: Status > Target health)
+   Every bank pod is UP: services, DynaStore, outbox relays, every 15 s.
+   Say: "Each service exposes /metrics; Prometheus finds pods by an
+   annotation and scrapes them automatically."
+
+3. Queries (Query tab > paste > Execute > Graph tab)
+
+   Requests per second, by service
+     sum by (service) (rate(http_requests_total[1m]))
+
+   Error rate (5xx), whole bank
+     sum(rate(http_requests_total{status=~"5.."}[1m]))
+
+   p95 latency per service
+     histogram_quantile(0.95, sum by (service, le) (rate(http_request_duration_seconds_bucket[5m])))
+
+   gRPC calls per second (payment path)
+     sum by (service) (rate(grpc_requests_total[1m]))
+
+   Payment outcomes
+     sum by (status) (rate(intake_payments_total[5m]))
+
+   Risk decisions
+     sum by (decision) (rate(risk_decisions_total[5m]))
+
+   Which risk rules fire
+     sum by (rule) (rate(risk_rule_hits_total[5m]))
+
+   DynaStore: are the three nodes up?
+     dynastore_peer_alive
+
+

@@ -171,7 +171,7 @@ class Engine:
         r = on("NEW_PAYEE")
         new_payee = not p.payee_trusted and f.payee_age_hours < r.get("hours", 24)
         if new_payee and p.amount >= r.get("min_amount", 0):
-            fire("NEW_PAYEE", "first payment to this payee")
+            fire("NEW_PAYEE", "first payment to this payee.")
         r = on("ATO_PATTERN")
         if new_device and new_payee and p.amount >= r.get("min_amount", 1e18):
             fire("ATO_PATTERN", "new device, new payee and a large amount together")
